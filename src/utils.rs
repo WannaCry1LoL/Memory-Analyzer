@@ -1,46 +1,41 @@
-use::lazy_static::lazy_static;
 use std::{
-	collections::HashSet,
+	collections::{HashSet, HashMap},
 	ffi::c_void,
 	mem,
 	ptr,
 };
-
-use windows::Win32::{
-	Foundation::HANDLE,
-	System::{
-		Diagnostics::Debug::ReadProcessMemory,
-		Memory::{
-			VirtualQueryEx,
-			MEMORY_BASIC_INFORMATION,
-			MEM_COMMIT,
-			PAGE_READWRITE,
+use std::ptr::null_mut;
+use windows::{
+	Win32::{
+		Foundation::{CloseHandle, HANDLE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH},
+		System::{
+			Diagnostics::Debug::ReadProcessMemory,
+			Memory::{
+				VirtualQueryEx,
+				VirtualAlloc,
+				VirtualFree,
+				MEMORY_BASIC_INFORMATION,
+				MEM_COMMIT,
+				PAGE_READWRITE,
+				MEM_RELEASE
+			},
+			SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+			SystemServices::MAXIMUM_ALLOWED,
+			Threading::{GetThreadId, GetProcessId, PROCESS_BASIC_INFORMATION}
+		}
+	},
+	Wdk::{
+		System::SystemInformation::{
+			NtQuerySystemInformation,
 		},
-		SystemInformation::{GetSystemInfo, SYSTEM_INFO}
+		System::Threading::{NtQueryInformationProcess, NtQueryInformationThread, ProcessBasicInformation}
 	},
 };
-
-enum Endianness {
-	Little,
-	Big
-}
-
-
-lazy_static!{
-	static ref ENDIAN: Endianness = unsafe {
-		match ptr::read_unaligned([0xDEu8, 0xADu8, 0xBEu8, 0xEFu8].as_ptr() as *const u32) {
-			0xDEADBEEF => Endianness::Big,
-			_ => Endianness::Little,
-		}
-	};
-}
-
+use crate::externs::{NtGetNextThread, nt_success, NtGetNextProcess, SYSTEM_BASICPROCESS_INFORMATION, SystemBasicProcessInformation};
 
 pub trait ToBytes {
 	fn to_ne_bytes_vec(&self) -> Vec<u8>;
 }
-
-
 
 macro_rules! impl_to_bytes {
     ($($t:ty),*) => {
@@ -57,15 +52,16 @@ macro_rules! impl_to_bytes {
 
 impl_to_bytes!(u16, u32, u64, i16, i32, i64, u128, i128);
 
+
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn get_sys_info() -> SYSTEM_INFO {
+pub unsafe fn get_sys_info() -> SYSTEM_INFO {
 	let mut sys_info: SYSTEM_INFO = mem::zeroed();
 	GetSystemInfo(&mut sys_info);
 	sys_info
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn iterate_mem_with_func<F: Fn(u8, &[u8], usize, usize) -> bool>(handle: HANDLE, callback: F) -> HashSet<usize> {
+pub unsafe fn iterate_mem_with_func<F: Fn(u8, &[u8], usize, usize) -> bool>(handle: HANDLE, callback: F) -> HashSet<usize> {
 	let mut addresses: HashSet<usize> = HashSet::new();
 	let si = get_sys_info();
 
@@ -80,75 +76,178 @@ unsafe fn iterate_mem_with_func<F: Fn(u8, &[u8], usize, usize) -> bool>(handle: 
 			size_of::<MEMORY_BASIC_INFORMATION>(),
 		);
 
-		if info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE {
-			let mut buffer: Vec<u8> = vec![0u8; info.RegionSize];
-			let mut read_bytes: usize = 0;
-			let res = ReadProcessMemory(
-				handle,
-				base_addr,
-				buffer.as_mut_ptr() as *mut c_void,
-				info.RegionSize,
-				Some(&mut read_bytes),
-			);
+		if !(info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) { continue; }
 
-			// TODO: Handle error
+		let mut buffer: Vec<u8> = vec![0u8; info.RegionSize];
+		let mut read_bytes: usize = 0;
+		let res = ReadProcessMemory(
+			handle,
+			base_addr,
+			buffer.as_mut_ptr() as *mut c_void,
+			info.RegionSize,
+			Some(&mut read_bytes),
+		);
 
-			for i in 0..read_bytes {
-				if callback(buffer[i], &buffer, i, read_bytes) {
-					addresses.insert(base_addr as usize + i);
-				}
+		// TODO: Handle error
+
+		for i in 0..read_bytes {
+			if callback(buffer[i], &buffer, i, read_bytes) {
+				addresses.insert(base_addr as usize + i);
 			}
 		}
-		base_addr = (info.BaseAddress as usize + info.RegionSize) as *mut _;
+		base_addr = info.BaseAddress.add(info.RegionSize);
 	}
-
 	addresses
 }
 
-#[allow(unused)]
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_byte(handle: HANDLE, byte: u8) -> HashSet<usize> {
-	iterate_mem_with_func(handle, |current, _, _, _| {
-		return current == byte;
-	})
+pub fn get_proc_threads(handle: HANDLE) -> Vec<usize> {
+	let mut ret: Vec<usize> = Vec::new();
+	unsafe {
+		let mut thread: HANDLE = HANDLE::default();
+		let mut prev_thread: HANDLE = HANDLE::default();
+		while nt_success(NtGetNextThread(
+			handle,
+			prev_thread,
+			MAXIMUM_ALLOWED,
+			0,
+			0,
+			&mut thread as *mut HANDLE,
+		))
+		{
+			ret.push(GetThreadId(thread) as usize);
+			if !prev_thread.is_invalid() {
+				CloseHandle(prev_thread);
+			}
+			prev_thread = thread;
+		}
+		if !prev_thread.is_invalid() {
+			CloseHandle(prev_thread);
+		}
+	}
+	ret
 }
 
-#[allow(unused)]
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_bytes(handle: HANDLE, bytes: &[u8]) -> HashSet<usize> {
-	let first = bytes[0];
-	let bytes_len = bytes.len();
-	iterate_mem_with_func(handle, |_, buffer, idx, bytes_read| {
-		buffer[idx] == first && bytes_read - idx >= bytes_len && buffer[idx..bytes_len + idx] == bytes[..]
-	})
+pub fn build_process_tree_new() -> HashMap<usize, Vec<usize>> {
+	let mut ret: HashMap<usize, Vec<usize>> = HashMap::new();
+
+	unsafe {
+		let mut bytes: u32 = 0;
+		let mut bytes_written: u32 = 0;
+		if NtQuerySystemInformation(
+			SystemBasicProcessInformation,
+			ptr::null_mut(),
+			0,
+			&mut bytes,
+		) == STATUS_INFO_LENGTH_MISMATCH {
+			let sys_info = VirtualAlloc(None, bytes as usize, MEM_COMMIT, PAGE_READWRITE);
+			let mut ptr = sys_info as *mut SYSTEM_BASICPROCESS_INFORMATION;
+			if nt_success(NtQuerySystemInformation(
+				SystemBasicProcessInformation,
+				sys_info,
+				bytes,
+				&mut bytes_written
+			)) {
+				let mut current_sys_info: SYSTEM_BASICPROCESS_INFORMATION;
+				loop {
+					current_sys_info = ptr::read_unaligned(ptr);
+					let ppid = current_sys_info.InheritedFromUniqueProcessId;
+					let pid = current_sys_info.UniqueProcessId;
+					ret
+						.entry(ppid)
+						.or_default()
+						.push(pid);
+					if current_sys_info.NextEntryOffset == 0 { break; }
+
+					ptr = ptr.byte_add(current_sys_info.NextEntryOffset as usize);
+				}
+			}
+			VirtualFree(sys_info, bytes as usize, MEM_RELEASE);
+		}
+	}
+
+	ret
 }
 
-#[allow(unused)]
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_string(handle: HANDLE, string: &str) -> HashSet<usize> {
-	find_bytes(handle, string.as_bytes()) // TODO: Handle 2 bpc strings
+pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
+	let mut map: HashMap<usize, Vec<usize>> = HashMap::new();
+	unsafe {
+		let mut proc: HANDLE = HANDLE::default();
+		let mut prev_proc: HANDLE = HANDLE::default();
+		let mut proc_info: PROCESS_BASIC_INFORMATION = mem::zeroed();
+		while nt_success(NtGetNextProcess(
+			prev_proc,
+			MAXIMUM_ALLOWED,
+			0,
+			0,
+			&mut proc as *mut HANDLE,
+		))
+		{
+			let mut bytes: u32 = 0;
+			if nt_success(NtQueryInformationProcess(
+				proc,
+				ProcessBasicInformation,
+				&mut proc_info as *mut _ as *mut c_void,
+				size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+				&mut bytes
+			)) {
+				map
+					.entry(proc_info.InheritedFromUniqueProcessId)
+					.or_default()
+					.push(proc_info.UniqueProcessId);
+			}
+			if !prev_proc.is_invalid() {
+				CloseHandle(prev_proc);
+			}
+			prev_proc = proc;
+		}
+		if !prev_proc.is_invalid() {
+			CloseHandle(prev_proc);
+		}
+	}
+	map
 }
+// todo: build some abstraction over process
+pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
+	let mut ret: isize = -1;
 
-#[allow(unused)]
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_number<T: ToBytes>(handle: HANDLE, num: T) -> HashSet<usize> {
-	find_bytes(handle, &num.to_ne_bytes_vec())
-}
+	unsafe {
+		let mut bytes: u32 = 0;
+		let mut bytes_written: u32 = 0;
+		if NtQuerySystemInformation(
+			SystemBasicProcessInformation,
+			null_mut(),
+			0,
+			&mut bytes,
+		) == STATUS_INFO_LENGTH_MISMATCH {
+			let sys_info = VirtualAlloc(None, bytes as usize, MEM_COMMIT, PAGE_READWRITE);
+			let mut ptr = sys_info as *mut SYSTEM_BASICPROCESS_INFORMATION;
+			if nt_success(NtQuerySystemInformation(
+				SystemBasicProcessInformation,
+				sys_info,
+				bytes,
+				&mut bytes_written
+			)) {
+				let mut current_sys_info: SYSTEM_BASICPROCESS_INFORMATION;
+				loop {
+					current_sys_info = ptr::read_unaligned(ptr);
 
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_single(handle: HANDLE, single: f32) -> HashSet<usize> {
-	iterate_mem_with_func(handle, |_, buffer, idx, _| {
-		let ptr = buffer[idx..].as_ptr() as *const f32;
-		let single_res = ptr::read_unaligned(ptr);
-		return (single - single_res).abs() < f32::EPSILON;
-	})
-}
+					if !current_sys_info.ImageName.Buffer.is_null()
+						&& let res = current_sys_info.ImageName.Buffer.to_string()
+						&& res.is_ok()
+					{
+						if res.unwrap() == name {
+							ret = current_sys_info.UniqueProcessId as isize;
+						}
+					}
+					if current_sys_info.NextEntryOffset == 0 { break; }
+					if ret != -1 { break; }
+					ptr = ptr.byte_add(current_sys_info.NextEntryOffset as usize);
+				}
+			}
+			VirtualFree(sys_info, bytes as usize, MEM_RELEASE);
+			return Some(ret as usize);
+		}
+	}
 
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn find_double(handle: HANDLE, double: f64) -> HashSet<usize> {
-	iterate_mem_with_func(handle, |_, buffer, idx, _| {
-		let ptr = buffer[idx..].as_ptr() as *const f64;
-		let double_res = ptr::read_unaligned(ptr);
-		return (double - double_res).abs() < f64::EPSILON;
-	})
+	None
 }

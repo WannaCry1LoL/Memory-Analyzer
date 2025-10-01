@@ -7,8 +7,8 @@ name = "MemScanTest"
 version = "0.1.0"
 dependencies = [
  "lazy_static",
- "ntapi",
  "sysinfo",
+ "winapi",
  "windows 0.62.0",
 ]
 
