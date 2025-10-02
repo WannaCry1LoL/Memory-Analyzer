@@ -33,7 +33,6 @@ pub struct SYSTEM_BASICPROCESS_INFORMATION
 	pub ImageName: UNICODE_STRING
 }
 
-
 #[link(name = "ntdll")]
 unsafe extern "system" {
 	fn RtlNtStatusToDosError(status: NTSTATUS) -> u32;

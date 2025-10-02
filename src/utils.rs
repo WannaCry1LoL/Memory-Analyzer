@@ -21,14 +21,14 @@ use windows::{
 			},
 			SystemInformation::{GetSystemInfo, SYSTEM_INFO},
 			SystemServices::MAXIMUM_ALLOWED,
-			Threading::{GetThreadId, GetProcessId, PROCESS_BASIC_INFORMATION}
+			Threading::{GetThreadId, PROCESS_BASIC_INFORMATION},
 		}
 	},
 	Wdk::{
 		System::SystemInformation::{
 			NtQuerySystemInformation,
 		},
-		System::Threading::{NtQueryInformationProcess, NtQueryInformationThread, ProcessBasicInformation}
+		System::Threading::{NtQueryInformationProcess, ProcessBasicInformation}
 	},
 };
 use crate::externs::{NtGetNextThread, nt_success, NtGetNextProcess, SYSTEM_BASICPROCESS_INFORMATION, SystemBasicProcessInformation};
@@ -66,7 +66,7 @@ pub unsafe fn iterate_mem_with_func<F: Fn(u8, &[u8], usize, usize) -> bool>(hand
 	let si = get_sys_info();
 
 	let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
-	let mut base_addr: *mut c_void = ptr::null_mut();
+	let mut base_addr: *mut c_void = null_mut();
 
 	while base_addr < si.lpMaximumApplicationAddress {
 		VirtualQueryEx(
@@ -76,30 +76,32 @@ pub unsafe fn iterate_mem_with_func<F: Fn(u8, &[u8], usize, usize) -> bool>(hand
 			size_of::<MEMORY_BASIC_INFORMATION>(),
 		);
 
-		if !(info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) { continue; }
+		if (info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE) {
+			let mut buffer: Vec<u8> = vec![0u8; info.RegionSize];
+			let mut read_bytes: usize = 0;
+			let res = ReadProcessMemory(
+				handle,
+				base_addr,
+				buffer.as_mut_ptr() as *mut c_void,
+				info.RegionSize,
+				Some(&mut read_bytes),
+			);
 
-		let mut buffer: Vec<u8> = vec![0u8; info.RegionSize];
-		let mut read_bytes: usize = 0;
-		let res = ReadProcessMemory(
-			handle,
-			base_addr,
-			buffer.as_mut_ptr() as *mut c_void,
-			info.RegionSize,
-			Some(&mut read_bytes),
-		);
+			// TODO: Handle error
 
-		// TODO: Handle error
-
-		for i in 0..read_bytes {
-			if callback(buffer[i], &buffer, i, read_bytes) {
-				addresses.insert(base_addr as usize + i);
+			for i in 0..read_bytes {
+				if callback(buffer[i], &buffer, i, read_bytes) {
+					addresses.insert(base_addr as usize + i);
+				}
 			}
 		}
+
 		base_addr = info.BaseAddress.add(info.RegionSize);
 	}
 	addresses
 }
 
+#[allow(unused)]
 pub fn get_proc_threads(handle: HANDLE) -> Vec<usize> {
 	let mut ret: Vec<usize> = Vec::new();
 	unsafe {
@@ -135,7 +137,7 @@ pub fn build_process_tree_new() -> HashMap<usize, Vec<usize>> {
 		let mut bytes_written: u32 = 0;
 		if NtQuerySystemInformation(
 			SystemBasicProcessInformation,
-			ptr::null_mut(),
+			null_mut(),
 			0,
 			&mut bytes,
 		) == STATUS_INFO_LENGTH_MISMATCH {
@@ -161,7 +163,7 @@ pub fn build_process_tree_new() -> HashMap<usize, Vec<usize>> {
 					ptr = ptr.byte_add(current_sys_info.NextEntryOffset as usize);
 				}
 			}
-			VirtualFree(sys_info, bytes as usize, MEM_RELEASE);
+			VirtualFree(sys_info, 0, MEM_RELEASE);
 		}
 	}
 
@@ -208,8 +210,6 @@ pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
 }
 // todo: build some abstraction over process
 pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
-	let mut ret: isize = -1;
-
 	unsafe {
 		let mut bytes: u32 = 0;
 		let mut bytes_written: u32 = 0;
@@ -228,6 +228,7 @@ pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 				&mut bytes_written
 			)) {
 				let mut current_sys_info: SYSTEM_BASICPROCESS_INFORMATION;
+
 				loop {
 					current_sys_info = ptr::read_unaligned(ptr);
 
@@ -236,16 +237,15 @@ pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 						&& res.is_ok()
 					{
 						if res.unwrap() == name {
-							ret = current_sys_info.UniqueProcessId as isize;
+							return Some(current_sys_info.UniqueProcessId);
 						}
 					}
 					if current_sys_info.NextEntryOffset == 0 { break; }
-					if ret != -1 { break; }
 					ptr = ptr.byte_add(current_sys_info.NextEntryOffset as usize);
 				}
 			}
-			VirtualFree(sys_info, bytes as usize, MEM_RELEASE);
-			return Some(ret as usize);
+			VirtualFree(sys_info, 0, MEM_RELEASE);
+
 		}
 	}
 
