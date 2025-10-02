@@ -3,6 +3,7 @@
 mod utils;
 mod scanning;
 mod externs;
+mod MemoryPattern;
 
 use std::fmt::Debug;
 use std::process::exit;

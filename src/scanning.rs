@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::ptr;
 use windows::Win32::Foundation::HANDLE;
-use crate::utils::{iterate_mem_with_func, ToBytes};
+use crate::MemoryPattern::MemoryPattern;
+use crate::utils::{iterate_mem_with_func};
 
 #[allow(unused)]
 pub fn find_byte(handle: HANDLE, byte: u8) -> HashSet<usize> {
@@ -36,29 +37,13 @@ pub fn find_string(handle: HANDLE, string: &str) -> HashSet<usize> {
 		.collect()
 }
 
-#[allow(unused)]
-pub fn find_number<T: ToBytes>(handle: HANDLE, num: T) -> HashSet<usize> {
-	find_bytes(handle, &num.to_ne_bytes_vec())
-}
-
-pub fn find_single(handle: HANDLE, single: f32) -> HashSet<usize> {
+pub fn find_pattern<T: MemoryPattern>(handle: HANDLE, value: T) -> HashSet<usize> {
 	unsafe {
 		iterate_mem_with_func(handle, |_, buffer, idx, bytes_read| {
-			if bytes_read - idx < 4 { return false; }
-			let ptr = buffer[idx..].as_ptr() as *const f32;
-			let single_res = ptr::read_unaligned(ptr);
-			return (single - single_res).abs() < f32::EPSILON;
-		})
-	}
-}
-
-pub fn find_double(handle: HANDLE, double: f64) -> HashSet<usize> {
-	unsafe {
-		iterate_mem_with_func(handle, |_, buffer, idx, bytes_read| {
-			if bytes_read - idx < 8 { return false; }
-			let ptr = buffer[idx..].as_ptr() as *const f64;
-			let double_res = ptr::read_unaligned(ptr);
-			return (double - double_res).abs() < f64::EPSILON; // probably should adjust this i think? arent floats dynamic or is this always the smallest difference between floating points of any scale?
+			if bytes_read - idx < T::size() {
+				return false;
+			}
+			value.matches(buffer[idx..].as_ptr())
 		})
 	}
 }

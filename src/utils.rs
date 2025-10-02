@@ -33,25 +33,6 @@ use windows::{
 };
 use crate::externs::{NtGetNextThread, nt_success, NtGetNextProcess, SYSTEM_BASICPROCESS_INFORMATION, SystemBasicProcessInformation};
 
-pub trait ToBytes {
-	fn to_ne_bytes_vec(&self) -> Vec<u8>;
-}
-
-macro_rules! impl_to_bytes {
-    ($($t:ty),*) => {
-        $(
-            impl ToBytes for $t {
-                fn to_ne_bytes_vec(&self) -> Vec<u8> {
-                    self.to_ne_bytes().to_vec()
-
-                }
-            }
-        )*
-    };
-}
-
-impl_to_bytes!(u16, u32, u64, i16, i32, i64, u128, i128);
-
 
 #[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe fn get_sys_info() -> SYSTEM_INFO {
