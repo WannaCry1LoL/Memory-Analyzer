@@ -25,7 +25,15 @@ pub fn find_bytes(handle: HANDLE, bytes: &[u8]) -> HashSet<usize> {
 
 #[allow(unused)]
 pub fn find_string(handle: HANDLE, string: &str) -> HashSet<usize> {
-	find_bytes(handle, string.as_bytes()) // TODO: Handle 2 bpc strings
+	find_bytes(handle, string.as_bytes())
+		.union(
+			&find_bytes(
+				handle,
+				&string.encode_utf16().flat_map(|c| c.to_ne_bytes()).collect::<Vec<u8>>()[..]
+			)
+		)
+		.copied()
+		.collect()
 }
 
 #[allow(unused)]
