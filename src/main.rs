@@ -1,10 +1,17 @@
-#![feature(let_chains)]
+#![feature(f16)]
+#![feature(f128)]
 
 mod utils;
 mod scanning;
 mod externs;
-mod MemoryPattern;
+mod memory_pattern; 
+mod matches;
+mod rw_helper;
+mod Process;
+mod memory_scanner;
+mod errors;
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::process::exit;
 use windows::Win32::{
@@ -15,7 +22,8 @@ use windows::Win32::{
 
 use sysinfo::{Pid, System};
 use windows::Win32::System::Threading::{CloseThreadpool, OpenThread, THREAD_GET_CONTEXT};
-use crate::utils::{find_proc_from_image_name};
+use crate::scanning::{find_pattern, find_string};
+use crate::utils::{build_process_tree, find_proc_from_image_name};
 
 fn get_proc_id_by_name(proc_name: &str) -> Option<Pid> {
 	let sys = System::new_all();
@@ -26,36 +34,21 @@ fn get_proc_id_by_name(proc_name: &str) -> Option<Pid> {
 }
 
 fn main() {
-	const PROC_NAME: &str = "MemTestingProc.exe";
-	const TEST_STR: &str = "abcdef";
+	const PROC_NAME: &str = "Blood West.exe";
 	let pid: Pid = get_proc_id_by_name(PROC_NAME).unwrap_or_else(|| {
 		eprintln!("Unable to find process {}", PROC_NAME);
 		exit(-1)
 	});
 
 	unsafe {
-		let handle = OpenProcess(
-			PROCESS_ALL_ACCESS,
-			false,
-			pid.as_u32()
-		).unwrap_or_else(|_| {
-			eprintln!("Unable to open process {} ({})", PROC_NAME, pid.as_u32());
-			exit(-1)
-		});
 		//utils::get_proc_threads(handle).iter().for_each(|pid| {println!("{}", pid)});
-		//scanning::find_string(handle, TEST_STR).iter().for_each(|val| { println!("{:#X}", val); });
+		//scanning::find_pattern(handle, TEST_STR).iter().for_each(|val| { println!("{:#X}", val); });
 
-		&utils::build_process_tree_new().iter().for_each(|pid| {
-			println!("{}: {}", pid.0, pid.1.iter().map(| x | { x.to_string() } ).collect::<Vec<_>>().join(", "));
-		});
-
-		println!("{}", find_proc_from_image_name(PROC_NAME).unwrap());
-
-		//scanning::find_string(handle, TEST_STR).iter().for_each(|x| { println!("{x:#X}") });
-		CloseHandle(handle).unwrap_or_else(|_| {
-			eprintln!("Unable to close process {} ({})", PROC_NAME, pid.as_u32());
-			exit(-1)
-		});
+		if let Some(pid) = find_proc_from_image_name(PROC_NAME) {
+			if let Ok(handle) = OpenProcess(PROCESS_ALL_ACCESS, false, pid as u32) {
+				find_pattern(handle, 3090f32).iter().for_each(|s| { println!("{}", s); });
+			}
+		}
 
 	}
 }

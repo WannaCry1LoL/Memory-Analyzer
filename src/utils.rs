@@ -189,6 +189,7 @@ pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
 	}
 	map
 }
+
 // todo: build some abstraction over process
 pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 	unsafe {
@@ -214,14 +215,14 @@ pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 					current_sys_info = ptr::read_unaligned(ptr);
 
 					if !current_sys_info.ImageName.Buffer.is_null()
-						&& let res = current_sys_info.ImageName.Buffer.to_string()
-						&& res.is_ok()
+						&& let Ok(res) = current_sys_info.ImageName.Buffer.to_string()
+						&& res == name
 					{
-						if res.unwrap() == name {
-							return Some(current_sys_info.UniqueProcessId);
-						}
+						return Some(current_sys_info.UniqueProcessId);
 					}
+
 					if current_sys_info.NextEntryOffset == 0 { break; }
+
 					ptr = ptr.byte_add(current_sys_info.NextEntryOffset as usize);
 				}
 			}
@@ -231,4 +232,11 @@ pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 	}
 
 	None
+}
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum TriState {
+	DontCare = 2,
+	True = 1,
+	False = 0,
 }

@@ -1,7 +1,9 @@
 use std::ffi::{c_ulong, c_void};
-use windows::Win32::Foundation::{NTSTATUS, HANDLE, UNICODE_STRING};
+use windows::Win32::Foundation::{NTSTATUS, HANDLE, UNICODE_STRING, WIN32_ERROR};
 use windows::Win32::System::Threading::{PROCESS_INFORMATION_CLASS, THREAD_INFORMATION_CLASS};
 use windows::Wdk::System::SystemInformation::{SYSTEM_INFORMATION_CLASS};
+
+
 #[inline(always)]
 pub fn nt_success(status: NTSTATUS) -> bool {
 	status.0 >= 0
@@ -35,7 +37,7 @@ pub struct SYSTEM_BASICPROCESS_INFORMATION
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
-	fn RtlNtStatusToDosError(status: NTSTATUS) -> u32;
+	fn RtlNtStatusToDosErrorRaw(status: NTSTATUS) -> u32;
 	fn NtSuspendProcess(process: HANDLE) -> NTSTATUS;
 	fn NtResumeProcess(process: HANDLE) -> NTSTATUS;
 
@@ -54,5 +56,21 @@ unsafe extern "system" {
 		attributes: u32,
 		flags: u32,
 		new_handle: *mut HANDLE
+	) -> NTSTATUS;
+
+	pub fn NtReadVirtualMemory(
+		process: HANDLE,
+		address: *const c_void,
+		buffer: *mut c_void,
+		num_to_read: usize,
+		num_read: *mut usize,
+	) -> NTSTATUS;
+
+	pub fn NtWriteVirtualMemory(
+		process: HANDLE,
+		address: *const c_void,
+		buffer: *const c_void,
+		num_to_write: usize,
+		num_written: *mut usize
 	) -> NTSTATUS;
 }

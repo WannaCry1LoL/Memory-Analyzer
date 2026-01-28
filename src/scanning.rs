@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ptr;
 use windows::Win32::Foundation::HANDLE;
-use crate::MemoryPattern::MemoryPattern;
+use crate::memory_pattern::MemoryPattern;
 use crate::utils::{iterate_mem_with_func};
 
 #[allow(unused)]
@@ -37,6 +37,7 @@ pub fn find_string(handle: HANDLE, string: &str) -> HashSet<usize> {
 		.collect()
 }
 
+#[allow(unused)]
 pub fn find_pattern<T: MemoryPattern>(handle: HANDLE, value: T) -> HashSet<usize> {
 	unsafe {
 		iterate_mem_with_func(handle, |_, buffer, idx, bytes_read| {
