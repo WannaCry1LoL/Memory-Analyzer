@@ -11,23 +11,17 @@ mod process;
 mod memory_scanner;
 mod errors;
 
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::io::{stdin, Read};
 use std::process::exit;
-use windows::Win32::{
-	Foundation::CloseHandle,
-	System::Threading::{OpenProcess, PROCESS_ALL_ACCESS},
-};
+use std::time::Instant;
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
 
 
-use sysinfo::{Pid, System};
-use windows::Win32::System::Threading::{CloseThreadpool, OpenThread, THREAD_GET_CONTEXT};
 use crate::matches::MatchType;
-use crate::memory_scanner::{MemoryScanner, MemoryScannerOptions, Pattern, PatternMatcher};
-use crate::process::Process;
-use crate::scanning::{find_pattern, find_string};
-use crate::utils::{build_process_tree, find_proc_from_image_name};
+use crate::memory_scanner::{MemoryScanner, Pattern, PatternMatcher};
+use crate::utils::find_proc_from_image_name;
+use sysinfo::{Pid, System};
 
 fn get_proc_id_by_name(proc_name: &str) -> Option<Pid> {
 	let sys = System::new_all();
@@ -38,7 +32,7 @@ fn get_proc_id_by_name(proc_name: &str) -> Option<Pid> {
 }
 
 fn main() {
-	const PROC_NAME: &str = "untitled.exe";
+	const PROC_NAME: &str = "Blood West.exe";
 	let pid: Pid = get_proc_id_by_name(PROC_NAME).unwrap_or_else(|| {
 		eprintln!("Unable to find process {}", PROC_NAME);
 		exit(-1)
@@ -56,22 +50,25 @@ fn main() {
 					Default::default(),
 				);
 				stdin().read_line(str);
-				let initial = u128::from_str_radix(str.trim(), 16).unwrap();
-				str.clear();
+				let initial = str::parse::<f32>(str.trim()).unwrap();
 				let pattern_tmp = Pattern::new(
-					PatternMatcher::Literal16(initial),
-					MatchType::GenericBytes(16)
+					PatternMatcher::Single(initial),
+					MatchType::Float
 				);
+				let mut time = Instant::now();
 				scanner.scan(pattern_tmp); // init
+				println!("Done with initial scan. Took {} seconds", time.elapsed().as_secs());
 				scanner.print_matches();
+				str.clear();
 				loop {
-					let mut num = 0u128;
 					let res = stdin().read_line(str);
-					if res.is_ok() && let Ok(number) = u128::from_str_radix(str.trim(), 16) {
+					if res.is_ok() && let Ok(number) = str::parse::<f32>(str.trim()) {
+						time = Instant::now();
 						scanner.narrow(Pattern::new(
-							PatternMatcher::Literal16(number),
-							MatchType::GenericBytes(16)
+							PatternMatcher::Single(number),
+							MatchType::Float
 						), false);
+						println!("Done with scan. Took {} seconds", time.elapsed().as_secs());
 						scanner.print_matches();
 					} else {
 						println!("Please enter a valid number");

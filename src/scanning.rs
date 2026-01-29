@@ -1,8 +1,7 @@
-use std::collections::HashSet;
-use std::ptr;
-use windows::Win32::Foundation::HANDLE;
 use crate::memory_pattern::MemoryPattern;
-use crate::utils::{iterate_mem_with_func};
+use crate::utils::iterate_mem_with_func;
+use std::collections::HashSet;
+use windows::Win32::Foundation::HANDLE;
 
 #[allow(unused)]
 pub fn find_byte(handle: HANDLE, byte: u8) -> HashSet<usize> {

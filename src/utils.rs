@@ -1,37 +1,35 @@
+use crate::externs::{nt_success, NtGetNextProcess, NtGetNextThread, SystemBasicProcessInformation, SYSTEM_BASICPROCESS_INFORMATION};
+use std::ptr::null_mut;
 use std::{
-	collections::{HashSet, HashMap},
+	collections::{HashMap, HashSet},
 	ffi::c_void,
 	mem,
 	ptr,
 };
-use std::ptr::null_mut;
 use windows::{
+	Wdk::{
+		System::SystemInformation::NtQuerySystemInformation,
+		System::Threading::{NtQueryInformationProcess, ProcessBasicInformation}
+	},
 	Win32::{
-		Foundation::{CloseHandle, HANDLE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH},
+		Foundation::{CloseHandle, HANDLE, STATUS_INFO_LENGTH_MISMATCH},
 		System::{
 			Diagnostics::Debug::ReadProcessMemory,
 			Memory::{
-				VirtualQueryEx,
 				VirtualAlloc,
 				VirtualFree,
+				VirtualQueryEx,
 				MEMORY_BASIC_INFORMATION,
 				MEM_COMMIT,
-				PAGE_READWRITE,
-				MEM_RELEASE
+				MEM_RELEASE,
+				PAGE_READWRITE
 			},
 			SystemInformation::{GetSystemInfo, SYSTEM_INFO},
 			SystemServices::MAXIMUM_ALLOWED,
 			Threading::{GetThreadId, PROCESS_BASIC_INFORMATION},
 		}
 	},
-	Wdk::{
-		System::SystemInformation::{
-			NtQuerySystemInformation,
-		},
-		System::Threading::{NtQueryInformationProcess, ProcessBasicInformation}
-	},
 };
-use crate::externs::{NtGetNextThread, nt_success, NtGetNextProcess, SYSTEM_BASICPROCESS_INFORMATION, SystemBasicProcessInformation};
 
 
 #[allow(unsafe_op_in_unsafe_fn)]

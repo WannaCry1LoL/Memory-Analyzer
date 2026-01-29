@@ -1,40 +1,8 @@
-use std::{
-	collections::{HashSet, HashMap},
-	ffi::c_void,
-	mem,
-	ptr,
-};
-use std::mem::MaybeUninit;
-use std::ptr::{addr_of, null, null_mut};
-use windows::{
-	Win32::{
-		Foundation::{CloseHandle, HANDLE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH},
-		System::{
-			Diagnostics::Debug::ReadProcessMemory,
-			Memory::{
-				VirtualQueryEx,
-				VirtualAlloc,
-				VirtualFree,
-				MEMORY_BASIC_INFORMATION,
-				MEM_COMMIT,
-				PAGE_READWRITE,
-				MEM_RELEASE
-			},
-			SystemInformation::{GetSystemInfo, SYSTEM_INFO},
-			SystemServices::MAXIMUM_ALLOWED,
-			Threading::{GetThreadId, PROCESS_BASIC_INFORMATION},
-		}
-	},
-	Wdk::{
-		System::SystemInformation::{
-			NtQuerySystemInformation,
-		},
-		System::Threading::{NtQueryInformationProcess, ProcessBasicInformation}
-	},
-};
-use windows::Win32::Foundation::{GetLastError, NTSTATUS, WIN32_ERROR};
 use crate::errors::{MemoryReadError, MemoryWriteError};
-use crate::externs::{NtGetNextThread, nt_success, NtGetNextProcess, SYSTEM_BASICPROCESS_INFORMATION, SystemBasicProcessInformation, NtReadVirtualMemory, nt_error, NtWriteVirtualMemory};
+use crate::externs::{nt_error, NtReadVirtualMemory, NtWriteVirtualMemory};
+use std::mem::MaybeUninit;
+use std::ptr::addr_of;
+use windows::Win32::Foundation::HANDLE;
 
 pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usize) -> Result<(), MemoryReadError> {
 	unsafe {

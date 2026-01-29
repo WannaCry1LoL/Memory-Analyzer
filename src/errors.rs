@@ -21,6 +21,9 @@ pub enum MemoryReadError {
 	/// NtReadVirtualMemory returned less bytes read than requested
 	NotEnoughBytesRead,
 
+	/// The passed buffer was too small
+	BufferTooSmall(usize),
+
 	/// The memory is not valid for the selected settings (ie PAGE_EXECUTE_READWRITE with execute set to False)
 	UnsuitableMemory,
 

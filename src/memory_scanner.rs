@@ -1,20 +1,20 @@
-use std::{f16, f128, mem};
-use std::cmp::PartialEq;
-use std::collections::{HashMap, HashSet};
-use std::env::var;
-use std::ffi::c_void;
-use std::fmt::LowerHex;
-use std::iter::Map;
-use std::ptr::null_mut;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows::Win32::System::Memory::{PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_EXECUTE, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, PAGE_TARGETS_INVALID, MEMORY_BASIC_INFORMATION, VirtualQueryEx, MEM_COMMIT};
+use rayon::iter::ParallelIterator;
 use crate::errors::MemoryReadError;
-use crate::matches::{Match, MatchLocation, MatchType, MatchValue, RegionId};
-use crate::memory_pattern::MemoryPattern;
+use crate::matches::{Match, MatchType, RegionId};
 use crate::rw_helper::read_bytes;
-use crate::utils::{get_sys_info, TriState};
 use crate::utils::TriState::{DontCare, False, True};
+use crate::utils::{get_sys_info, TriState};
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr::{null_mut, read_unaligned};
+use std::{f128, f16, mem, slice};
+use std::sync::Arc;
+use rayon::prelude::IntoParallelIterator;
+use winapi::um::memoryapi::{GetProcessWorkingSetSizeEx, VirtualFree};
+use windows::core::s;
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Memory::{VirtualAlloc, VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RELEASE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_PROTECTION_FLAGS, PAGE_READWRITE, PAGE_WRITECOPY, SETPROCESSWORKINGSETSIZEEX_FLAGS};
+use crate::externs::{NtResumeProcess, NtSuspendProcess};
 
 #[derive(Clone)]
 pub enum PatternMatcher {
@@ -39,6 +39,11 @@ pub enum PatternMatcher {
 	List(Vec<PatternMatcher>),
 }
 
+macro_rules! buffer_to_type {
+    ($t:ty, $expression:ident) => {
+	    <$t>::from_ne_bytes(<[u8; std::mem::size_of::<$t>()]>::try_from($expression).unwrap())
+    };
+}
 
 impl PatternMatcher {
 	pub fn size(&self) -> usize {
@@ -61,46 +66,53 @@ impl PatternMatcher {
 		if size == 0 {
 			return true;
 		}
-		let mut read = &buffer[..size];
+		if buffer.len() < size {
+			return false;
+		}
+		let read = &buffer[..size];
 		match &self {
 			Self::Wildcard => true,
 			Self::Gap(n) => true,
 			Self::Literal(val) => read.first().unwrap() == val,
-			Self::Literal2(val) => unsafe {
-				std::ptr::read_unaligned(read.as_ptr() as *const u16) == *val
+			Self::Literal2(expected) => {
+				let actual = buffer_to_type!(u16, buffer);
+				actual == *expected
 			},
-			Self::Literal4(val) => unsafe {
-				std::ptr::read_unaligned(read.as_ptr() as *const u32) == *val
+			Self::Literal4(expected) => {
+				let actual = buffer_to_type!(u32, buffer);
+				actual == *expected
 			},
-			Self::Literal8(val) => unsafe {
-				std::ptr::read_unaligned(read.as_ptr() as *const u64) == *val
+			Self::Literal8(expected) => {
+				let actual = buffer_to_type!(u64, buffer);
+				actual == *expected
 			},
-			Self::Literal16(val) => unsafe {
-				std::ptr::read_unaligned(read.as_ptr() as *const u128) == *val
+			Self::Literal16(expected) => {
+				let actual = buffer_to_type!(u128, buffer);
+				actual == *expected
 			},
 			Self::Range { lower, upper } => {
 				let tmp = read.first().unwrap();
 				tmp >= lower && tmp <= upper
 			},
 			Self::Half(expected) => {
-				let val = f16::from_ne_bytes(<[u8; 2]>::try_from(read).unwrap());
+				let val = buffer_to_type!(f16, read);
 				(val - expected).abs() < 0.05
 			},
-			Self::Single(expected) => {
-				let val = f32::from_ne_bytes(<[u8; 4]>::try_from(read).unwrap());
-				(val - expected).abs() < 0.01
+			Self::Single(expected) => unsafe {
+				let val = read_unaligned::<f32>(read.as_ptr() as _);
+				(val - expected).abs() < 0.05
 			},
 			Self::Double(expected) => {
-				let val = f64::from_ne_bytes(<[u8; 8]>::try_from(read).unwrap());
+				let val = buffer_to_type!(f64, read);
 				(val - expected).abs() < 0.01
 			},
 			Self::Quad(expected) => {
-				let val = f128::from_ne_bytes(<[u8; 16]>::try_from(read).unwrap());
+				let val = buffer_to_type!(f128, read);
 				(val - expected).abs() < 0.01
 			}
 			Self::Repeated { pattern, amount } => {
-				let mut chunks = read.chunks(pattern.size());
-				chunks.len() == *amount && chunks.all(|chunk| pattern.matches(chunk))
+				read.len() == pattern.size() * amount
+				&& read.chunks_exact(pattern.size()).all(|c| pattern.matches(c))
 			},
 			Self::Not(pattern) => !pattern.matches(read),
 			Self::Or(patterns) => patterns.iter().any(|pattern| pattern.matches(read)),
@@ -109,11 +121,12 @@ impl PatternMatcher {
 				byte & mask == *value
 			},
 			Self::List(patterns) => {
-				for pattern in patterns {
-					if !pattern.matches(read) { return false };
-					read = &read[..size + pattern.size()]
-				}
-				true
+				let mut new_read = read;
+				patterns.iter().all(|p| {
+					let res = p.matches(&new_read[..p.size()]);
+					new_read = &new_read[p.size()..];
+					res
+				})
 			},
 			Self::None => unreachable!(),
 		}
@@ -223,13 +236,13 @@ impl MemoryScanner {
 	pub fn print_matches(&self) {
 		self.state.results.iter().for_each(|(region, results)| {
 			println!("Address: {}", results.iter().map(|x| format!("{:X}", region.0 + x.location.offset)).collect::<Vec<_>>().join(", "));
-
+			// after some fiddling i gave up just did it like this
 		})
 	}
-	fn get_chunk_info(&self, base_addr: *const c_void, info: &mut MEMORY_BASIC_INFORMATION) {
+	fn get_chunk_info(handle: HANDLE, base_addr: *const c_void, info: &mut MEMORY_BASIC_INFORMATION) {
 		unsafe {
 			VirtualQueryEx(
-				self.handle,
+				handle,
 				Some(base_addr),
 				info,
 				size_of::<MEMORY_BASIC_INFORMATION>(),
@@ -237,17 +250,29 @@ impl MemoryScanner {
 		}
 	}
 
-	fn get_chunk(&self, base_addr: *const c_void, info: &mut MEMORY_BASIC_INFORMATION) -> Result<Vec<u8>, MemoryReadError> {
-		self.get_chunk_info(base_addr, info);
-		if !(info.State == MEM_COMMIT && self.options.check_page_flags(info.Protect)) {
+	#[inline]
+	unsafe fn get_chunk(handle: HANDLE, options: &MemoryScannerOptions, base_addr: *const c_void, info: &mut MEMORY_BASIC_INFORMATION) -> Result<Vec<u8>, MemoryReadError> {
+		Self::get_chunk_info(handle, base_addr, info);
+		if !(info.State == MEM_COMMIT && options.check_page_flags(info.Protect)) {
 			return Err(MemoryReadError::UnsuitableMemory);
 		}
-		let mut buffer: Vec<u8> = vec![0u8; info.RegionSize];
 
+		let mut buffer = vec![0u8; info.RegionSize];
 
-		let res = read_bytes(self.handle, info.BaseAddress as _, buffer.as_mut_ptr(), info.RegionSize);
+		let res = read_bytes(handle, info.BaseAddress as _, buffer.as_mut_ptr(), info.RegionSize);
 		res?;
 		Ok(buffer)
+	}
+
+	unsafe fn get_chunk_buffer(handle: HANDLE, options: &MemoryScannerOptions, base_addr: *const c_void, info: &mut MEMORY_BASIC_INFORMATION, buffer: *mut u8) -> Result<(), MemoryReadError> {
+		Self::get_chunk_info(handle, base_addr, info);
+		if !(info.State == MEM_COMMIT && options.check_page_flags(info.Protect)) {
+			return Err(MemoryReadError::UnsuitableMemory);
+		}
+
+		let res = read_bytes(handle, info.BaseAddress as _, buffer, info.RegionSize);
+		res?;
+		Ok(())
 	}
 
 	pub fn new(handle: HANDLE, options: MemoryScannerOptions) -> Self {
@@ -263,11 +288,35 @@ impl MemoryScanner {
 			let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
 			let mut base_addr: *mut c_void = null_mut();
 
+			let options = &self.options;
+			let handle = self.handle;
+
+			/*
+
+			let mut flags: u32 = mem::zeroed();
+			let mut min_size: usize = 0;
+			let mut max_size: usize = 0;
+
+			GetProcessWorkingSetSizeEx(
+				handle.0,
+				&mut min_size,
+				&mut max_size,
+				&mut flags,
+			);
+
+			let buffer = VirtualAlloc(
+				None,
+				max_size / 1024,
+				MEM_COMMIT,
+				PAGE_READWRITE
+			) as *mut u8;
+			let buffer_as_slice = slice::from_raw_parts(buffer, (max_size / 1024) as _);
+			*/
 			while base_addr < si.lpMaximumApplicationAddress {
-				let res = self.get_chunk(base_addr, &mut info);
-				if let Ok(buffer) = res {
-					for i in (0..info.RegionSize - pattern.size()).step_by(increment) {
-						let slice = &buffer[i..i + pattern.size()];
+				let res = Self::get_chunk(handle, options, base_addr, &mut info);//Self::get_chunk_buffer(handle, options, base_addr, &mut info, buffer);
+				if let Ok(buff) = res {
+					for i in (0..info.RegionSize).step_by(increment) {
+						let slice = &buff[i..];//&buffer_as_slice[i..];
 						if pattern.matches(slice) {
 							new_state.results
 								.entry(RegionId(base_addr as usize)).or_insert(Default::default())
@@ -278,6 +327,7 @@ impl MemoryScanner {
 
 				base_addr = info.BaseAddress.add(info.RegionSize);
 			}
+			//VirtualFree(buffer as _, max_size, MEM_RELEASE.0);
 		}
 		self.state = new_state;
 	}
@@ -285,11 +335,14 @@ impl MemoryScanner {
 	pub fn update(&mut self) {
 		unsafe {
 			let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+
+			let handle = self.handle;
+			let options = &self.options;
 			let old_results = std::mem::take(&mut self.state.results);
 			self.state.results = old_results
 				.into_iter()
 				.filter_map(|(key, mut value)| {
-					if let Ok(buffer) = &self.get_chunk(key.0 as _, &mut info) {
+					if let Ok(buffer) = Self::get_chunk(handle, options, key.0 as _, &mut info) {
 						for val in &mut value {
 							let base = val.location.offset;
 							let tmp_val = &buffer[base..base + val.initial_value.value.len()];
@@ -304,13 +357,14 @@ impl MemoryScanner {
 
 	pub fn narrow(&mut self, pattern: Pattern, compare_to_initial: bool) {
 		unsafe {
-			let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+			let handle_tmp = self.handle.0 as usize;
 			self.update();
 			let old_results = mem::take(&mut self.state.results);
 			self.state.results = old_results
-				.into_iter()
-				.filter_map(|(key, mut value)| {
-					if let Ok(buffer) = &self.get_chunk(key.0 as _, &mut info) {
+				.into_par_iter()
+				.filter_map(|(key, value)| {
+					let mut info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+					if let Ok(buffer) = Self::get_chunk(mem::transmute::<usize, HANDLE>(handle_tmp), &self.options, key.0 as _, &mut info) {
 						let new = value
 							.into_iter()
 							.filter(|val| {
@@ -321,7 +375,7 @@ impl MemoryScanner {
 								}
 							})
 							.collect::<Vec<_>>();
-						if new.len() > 0 {
+						if !new.is_empty() {
 							return Some((key, new));
 						}
 					}

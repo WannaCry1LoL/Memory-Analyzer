@@ -1,30 +1,36 @@
-use std::ffi::{c_ulong, c_void};
-use windows::Win32::Foundation::{NTSTATUS, HANDLE, UNICODE_STRING, WIN32_ERROR};
-use windows::Win32::System::Threading::{PROCESS_INFORMATION_CLASS, THREAD_INFORMATION_CLASS};
-use windows::Wdk::System::SystemInformation::{SYSTEM_INFORMATION_CLASS};
+use std::ffi::c_void;
+use windows::Wdk::System::SystemInformation::SYSTEM_INFORMATION_CLASS;
+use windows::Win32::Foundation::{HANDLE, NTSTATUS, UNICODE_STRING};
 
-
+#[allow(unused)]
 #[inline(always)]
 pub fn nt_success(status: NTSTATUS) -> bool {
 	status.0 >= 0
 }
 
+#[allow(unused)]
 #[inline(always)]
 pub fn nt_information(status: NTSTATUS) -> bool {
 	(status.0 >> 30) == 1
 }
 
+#[allow(unused)]
 #[inline(always)]
 pub fn nt_warning(status: NTSTATUS) -> bool {
 	(status.0 >> 30) == 2
 }
 
+#[allow(unused)]
 #[inline(always)]
 pub fn nt_error(status: NTSTATUS) -> bool {
 	(status.0 >> 30) == 3
 }
 
+
+#[allow(non_upper_case_globals)]
 pub const SystemBasicProcessInformation: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(252i32);
+
+#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct SYSTEM_BASICPROCESS_INFORMATION
 {
@@ -38,8 +44,8 @@ pub struct SYSTEM_BASICPROCESS_INFORMATION
 #[link(name = "ntdll")]
 unsafe extern "system" {
 	fn RtlNtStatusToDosError(status: NTSTATUS) -> u32;
-	fn NtSuspendProcess(process: HANDLE) -> NTSTATUS;
-	fn NtResumeProcess(process: HANDLE) -> NTSTATUS;
+	pub fn NtSuspendProcess(process: HANDLE) -> NTSTATUS;
+	pub fn NtResumeProcess(process: HANDLE) -> NTSTATUS;
 
 	pub fn NtGetNextThread(
 		process: HANDLE,
