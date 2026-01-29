@@ -37,7 +37,7 @@ pub struct SYSTEM_BASICPROCESS_INFORMATION
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
-	fn RtlNtStatusToDosErrorRaw(status: NTSTATUS) -> u32;
+	fn RtlNtStatusToDosError(status: NTSTATUS) -> u32;
 	fn NtSuspendProcess(process: HANDLE) -> NTSTATUS;
 	fn NtResumeProcess(process: HANDLE) -> NTSTATUS;
 
