@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lazy_static = "1.5.0"
-rayon = "1.11.0"
-sysinfo = "0.36.1"
-winapi = { version = "0.3.9", features = ["std", "memoryapi"] }
+bitvec = "1.1.1"
+num-traits = "0.2.19"
+sysinfo = "0.39.5"
 windows = { version = "0.62.0", features = ["Win32", "Win32_System", "Win32_System_Threading", "Win32_UI", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Diagnostics", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemServices", "Win32_System_ProcessStatus", "Win32_System_Kernel", "Wdk", "Wdk_System", "Wdk_System_SystemInformation", "Wdk_System_Threading"] }

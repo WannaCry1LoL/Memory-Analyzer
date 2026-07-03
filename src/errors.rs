@@ -1,5 +1,6 @@
-use windows::Win32::Foundation::NTSTATUS;
+use windows::Win32::Foundation::{NTSTATUS, WIN32_ERROR};
 
+#[derive(Debug)]
 pub enum ProcessError {
 	/// The handle is invalid
 	InvalidHandle,
@@ -17,6 +18,13 @@ pub enum ProcessError {
 	Unknown,
 }
 
+#[derive(Debug)]
+pub enum MemoryScanError {
+	/// The memory dump failed because an error occured while dumping process memory
+	MemoryDumpFailed(std::io::Error),
+}
+
+#[derive(Debug)]
 pub enum MemoryReadError {
 	/// NtReadVirtualMemory returned less bytes read than requested
 	NotEnoughBytesRead,
@@ -30,9 +38,16 @@ pub enum MemoryReadError {
 	Other(NTSTATUS),
 }
 
+#[derive(Debug)]
 pub enum MemoryWriteError {
 	/// NtWriteVirtualMemory returned less bytes written than requested
 	NotEnoughBytesWritten,
 	Other(NTSTATUS),
 }
 
+#[derive(Debug)]
+pub enum ProcessImagePathError {
+	/// Windows returned invalid UTF 16
+	InvalidUtf16ImagePath,
+	Unknown(WIN32_ERROR)
+}

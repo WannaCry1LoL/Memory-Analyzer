@@ -1,14 +1,19 @@
-use sysinfo::Pid;
-use std::convert::{TryFrom, TryInto};
-use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, HANDLE, HWND, NTSTATUS};
-use windows::Win32::System::Threading::{GetProcessHandleFromHwnd, GetProcessId, OpenProcess, PROCESS_ALL_ACCESS};
 use crate::errors::ProcessError;
+use crate::win_helpers::get_process_image_path;
+use std::convert::{TryFrom, TryInto};
+use sysinfo::Pid;
+use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, HANDLE, HWND};
+use windows::Win32::System::Threading::{
+	GetProcessHandleFromHwnd, GetProcessId, OpenProcess, PROCESS_ALL_ACCESS
+};
 
 type ErrorType = ProcessError;
 
 pub struct Process {
 	handle: HANDLE,
-	pid: Pid
+	pid: Pid,
+	image_name: String,
+	image_path: String,
 }
 
 impl Process {
@@ -26,11 +31,16 @@ impl Process {
 				false,
 				pid
 			);
+
 			if let Ok(handle) = new_handle {
+				let path = get_process_image_path(handle).unwrap_or_default();
+				let image_name = path.rsplit_once('/').map(|(_, p)| p).unwrap_or_default().to_string();
 				Ok(
 					Process {
 						handle,
-						pid: Pid::from_u32(pid)
+						pid: Pid::from_u32(pid),
+						image_path: path,
+						image_name,
 					}
 				)
 			} else {
@@ -66,14 +76,6 @@ impl Process {
 
 	pub fn get_pid(&self) -> Pid {
 		self.pid
-	}
-
-	pub fn get_image_name() -> Result<String, NTSTATUS> {
-		todo!()
-	}
-
-	pub fn get_process_name(&self) -> Result<String, NTSTATUS> {
-		todo!()
 	}
 }
 

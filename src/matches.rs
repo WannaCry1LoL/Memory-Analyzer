@@ -1,67 +1,49 @@
+use bitvec::prelude::*;
+use crate::mem2disk::BlockDescriptor;
+use crate::utils::MatchMask;
 
-#[derive(Clone, Copy, Debug)]
-pub enum MatchType {
-	Generic1Byte,
-	Generic2Byte,
-	Generic4Byte,
-	Generic8Byte,
-	Generic16Byte,
-	Float,
-	Double,
-	Boolean,
-	GenericBytes(usize),
-	StringUTF8(usize),
-	StringUTF16(usize),
+#[derive(Clone, Debug)]
+pub struct MatchingBlock {
+	/// Virtual Address of the Section
+	pub base_address: usize,
+	/// Bitmask for n byte aligned matches
+	pub match_mask: MatchMask
 }
 
-impl MatchType {
-	pub fn size(self) -> usize {
-		match self {
-			MatchType::Generic1Byte => 1,
-			MatchType::Generic2Byte => 2,
-			MatchType::Generic4Byte => 4,
-			MatchType::Generic8Byte => 8,
-			MatchType::Generic16Byte => 16,
-			MatchType::Float => 4,
-			MatchType::Double => 8,
-			MatchType::Boolean => 1,
-			MatchType::GenericBytes(size) => size,
-			MatchType::StringUTF8(size) => size,
-			MatchType::StringUTF16(size) => size,
+impl MatchingBlock {
+	pub fn new(base: BlockDescriptor, indices: Vec<usize>, alignment: usize) -> Self {
+		debug_assert!(!indices.is_empty());
+		debug_assert_ne!(alignment, 0);
+
+		let mut bv = BitVec::repeat(false, indices.last().unwrap() / alignment + 1);
+
+		for i in indices {
+			debug_assert_eq!(i % alignment, 0);
+			bv.set(i / alignment, true);
+		}
+
+		MatchingBlock {
+			base_address: base.virtual_address,
+			match_mask: bv
 		}
 	}
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct RegionId(pub usize);
-
-#[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub struct MatchLocation {
-	pub offset: usize,
-}
 
 #[derive(Clone, Debug)]
-#[repr(transparent)]
-pub struct MatchValue {
-	pub value: Vec<u8>
+pub struct MatchingState {
+	/// The alignment that was used to generate the scan
+	pub alignment: usize,
+	pub blocks: Vec<MatchingBlock>,
+	/// Ordered data, contains the values of the previous scan.
+	pub data: Vec<u8>
 }
 
-pub struct Match {
-	pub match_type: MatchType,
-	pub location: MatchLocation,
-
-	pub value: MatchValue,
-	pub initial_value: MatchValue
-}
-
-impl Match {
-	pub fn new(match_type: MatchType, location: usize, value: &[u8], x: &[u8]) -> Self {
+impl MatchingState {
+	pub fn new(alignment: usize) -> Self {
 		Self {
-			match_type,
-			location: MatchLocation { offset: location },
-			value: MatchValue { value: value.to_vec() } ,
-			initial_value: MatchValue { value: value.to_vec() }
+			alignment,
+			blocks: vec![],
+			data: vec![]
 		}
 	}
 }
