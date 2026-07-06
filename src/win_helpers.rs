@@ -1,11 +1,9 @@
 use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
 use crate::errors::{MemoryReadError, MemoryWriteError, ProcessImagePathError};
-use crate::externs::{nt_error, nt_success, NtReadVirtualMemory, NtWriteVirtualMemory, SystemBasicProcessInformation, SYSTEM_BASICPROCESS_INFORMATION};
+use crate::externs::*;
 use std::mem::MaybeUninit;
-use std::ptr::{addr_of, null_mut};
-use std::{mem, ptr};
-use windows::Wdk::System::SystemInformation::NtQuerySystemInformation;
-use windows::Win32::Foundation::{GetLastError, HANDLE, MAX_PATH, STATUS_INFO_LENGTH_MISMATCH};
+use std::{mem, ptr, ptr::null_mut};
+use windows::Win32::Foundation::{GetLastError, HANDLE, STATUS_INFO_LENGTH_MISMATCH};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
 
@@ -37,12 +35,7 @@ pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usiz
 	if read_bytes != len {
 		return Err(MemoryReadError::NotEnoughBytesRead)
 	}
-
-	if nt_error(status) {
-		Err(MemoryReadError::Other(status))
-	} else {
-		Ok(())
-	}
+	status.into_result().map_err(MemoryReadError::Other)
 }
 
 pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: usize) -> Result<(), MemoryWriteError> {
@@ -58,11 +51,8 @@ pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: u
 	if written_bytes != len {
 		return Err(MemoryWriteError::NotEnoughBytesWritten)
 	}
-	if nt_error(status) {
-		Err(MemoryWriteError::Other(status))
-	} else {
-		Ok(())
-	}
+
+	status.into_result().map_err(MemoryWriteError::Other)
 }
 
 pub fn read_generic<T: Sized>(handle: HANDLE, address: *const u8) -> Result<T, MemoryReadError> {
@@ -73,31 +63,27 @@ pub fn read_generic<T: Sized>(handle: HANDLE, address: *const u8) -> Result<T, M
 }
 
 pub fn write_generic<T: Sized>(handle: HANDLE, address: *const u8, value: T) -> Result<(), MemoryWriteError> {
-	let ptr = addr_of!(value);
-	let res = write_bytes(handle, address, ptr as *const _, size_of::<T>());
+	let ptr = &raw const value;
+	let res = write_bytes(handle, address, ptr as _, size_of::<T>());
 	res?;
 	Ok(())
 }
 
 pub fn get_process_image_path(handle: HANDLE) -> Result<String, ProcessImagePathError> {
-	let mut buffer = vec![0u16; MAX_PATH as _];
+	let mut buffer = vec![0u16; 1024];
 	let mut size = buffer.len() as u32;
 
 	unsafe {
-		let result = QueryFullProcessImageNameW(
+		QueryFullProcessImageNameW(
 			handle,
 			PROCESS_NAME_FORMAT(0),
 			windows::core::PWSTR(buffer.as_mut_ptr()),
 			&mut size,
-		);
-		let status = GetLastError();
-
-		if result.is_ok() {
-			String::from_utf16(&buffer[0..size as usize]).map_err(|_| InvalidUtf16ImagePath)
-		} else {
-			Err(ProcessImagePathError::Unknown(status))
-		}
+		)
+			.map_err(|_| ProcessImagePathError::Unknown(GetLastError()))?;
 	}
+	String::from_utf16(&buffer[0..size as usize])
+		.map_err(|_| InvalidUtf16ImagePath)
 }
 
 pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATION) -> EnumerationState<T>) -> Option<T> {
@@ -117,12 +103,12 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATI
 		let mut sys_info = vec![0u8; bytes as usize];
 		let mut base_ptr = sys_info.as_ptr();
 
-		if nt_success(NtQuerySystemInformation(
+		if NtQuerySystemInformation(
 			SystemBasicProcessInformation,
 			sys_info.as_mut_ptr() as _,
 			bytes,
 			&mut bytes_written
-		)) {
+		).is_ok() {
 			let mut current_sys_info: SYSTEM_BASICPROCESS_INFORMATION;
 
 			loop {
@@ -135,8 +121,8 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATI
 					EnumerationState::Break => break,
 				}
 
-				if current_sys_info.NextEntryOffset == 0 { break; }
-				base_ptr = base_ptr.add(current_sys_info.NextEntryOffset as _);
+				if current_sys_info.next_entry_offset == 0 { break; }
+				base_ptr = base_ptr.add(current_sys_info.next_entry_offset as _);
 			}
 		}
 

@@ -2,12 +2,13 @@ use crate::simd_types::ToSimd;
 use crate::utils::MatchMask;
 use bitvec::order::Lsb0;
 use bitvec::view::BitView;
-use num_traits::{Float, Saturating};
+use num_traits::Float;
 use std::cmp::Ordering;
 use std::ptr::read_unaligned;
 use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
 use std::simd::num::SimdFloat;
 use std::simd::prelude::*;
+use crate::utils::get;
 
 pub trait FromU128 {
 	fn from_u128(x: u128) -> Self;
@@ -46,10 +47,6 @@ impl<T: Float> FuzzyEq for T {
 	}
 }
 
-macro_rules! get {
-	($e1:expr, $e2:expr) => { unsafe { $e1.get_unchecked($e2) } };
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum ScanCondition<T: Scannable> {
 	/// Equality
@@ -67,6 +64,27 @@ pub enum ScanCondition<T: Scannable> {
 impl<T> ScanCondition<T> where T : Scannable {
 	pub	fn default_alignment(&self) -> usize {
 		<T as Scannable>::DEFAULT_ALIGNMENT
+	}
+}
+
+impl<T> ScanCondition<T> where T : Scannable + FromU128 {
+	pub fn from_logical_range(lo: i128, hi: i128) -> ScanCondition<T> {
+		let bits: usize = <T as ToSimd>::SIZE * 8;
+
+		let range_min = -(1i128 << (bits - 1));
+		let range_max = (1i128 << bits) - 1;
+
+		let clamped_lo = lo.clamp(range_min, range_max) as _;
+		let clamped_hi = hi.clamp(range_min, range_max) as _;
+
+		let thing_lo: T = T::from_u128(clamped_lo);
+		let thing_hi: T = T::from_u128(clamped_hi);
+
+		match clamped_lo.cmp(&clamped_hi) {
+			Ordering::Equal   => ScanCondition::Eq(thing_lo),
+			Ordering::Less    => ScanCondition::Range(thing_lo, thing_hi),
+			Ordering::Greater => ScanCondition::WrappingRange(thing_lo, thing_hi),
+		}
 	}
 }
 
@@ -94,11 +112,23 @@ pub trait Scannable : PartialEq + PartialOrd + ToSimd + 'static {
 	}
 }
 
+#[inline]
+fn spacing_mask(ratio: usize) -> u64 {
+	let mut mask = 0;
+	for i in 0..(64 / ratio) {
+		mask |= 1 << (i * ratio);
+	}
+	mask
+}
+
 pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize) -> MatchMask {
+	use core::arch::x86_64::{ _pext_u64, _pdep_u64 };
+
 	let elem_size = T::SIZE;
 	let reg_width = size_of::<T::Vector>();
-	let mut res2 = MatchMask::new();
 	let alignment = alignment.max(1);
+	let elements = 1 + (bytes.len().saturating_sub(elem_size)) / alignment;
+	let mut res2 = MatchMask::with_capacity(elements);
 
 	if bytes.len() < elem_size {
 		return res2;
@@ -106,34 +136,52 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 
 	let mut i = 0;
 
-	let stagger_limit = if alignment < elem_size { elem_size } else { 1 };
-
-	while i + reg_width + stagger_limit - 1 <= bytes.len() {
-		for offset in (0..stagger_limit).step_by(alignment) {
-			let chunk = get!(bytes, i + offset .. i + offset + reg_width);
+	if alignment == elem_size {
+		while i + reg_width <= bytes.len() {
+			let chunk = get!(bytes, i.. i + reg_width);
 			let v = T::load(chunk);
-			let bitmask = T::eval(&cond, v);
-
-			res2.extend_from_bitslice(&bitmask.view_bits::<Lsb0>()[..T::LANES]);
-			/*
-			while bitmask != 0 {
-				let lane = bitmask.trailing_zeros() as usize;
-				res.push(i + offset + lane * elem_size);
-				bitmask &= bitmask - 1;
-			}
-			*/
+			let mask = T::eval(&cond, v);
+			res2.extend_from_raw_slice(&[mask]);
+			i += reg_width;
 		}
-		i += reg_width;
+	} else if alignment > elem_size {
+		debug_assert_eq!(alignment % elem_size, 0);
+		let ratio = alignment / elem_size;
+		let extract_mask = spacing_mask(ratio);
+		while i + reg_width <= bytes.len() {
+			let chunk = get!(bytes, i.. i + reg_width);
+			let v = T::load(chunk);
+			let mask = T::eval(&cond, v);
+			let compressed = unsafe { _pext_u64(mask, extract_mask) };
+			let view = &compressed.view_bits::<Lsb0>()[..T::LANES / ratio];
+			res2.extend_from_bitslice(view);
+			i += reg_width;
+		}
+	} else {
+		debug_assert_eq!(elem_size % alignment, 0);
+		let ratio = elem_size / alignment;
+		let deposit_mask = spacing_mask(ratio);
+		while i + reg_width + elem_size - 1 <= bytes.len() {
+			let mut chunk_mask = 0u64;
+			for offset in (0..elem_size).step_by(alignment) {
+				let chunk = get!(bytes, i + offset .. i + offset + reg_width);
+				let v = T::load(chunk);
+				let bitmask = T::eval(&cond, v);
+				let spaced_bits = unsafe { _pdep_u64(bitmask, deposit_mask) };
+				chunk_mask |= spaced_bits << (offset / alignment);
+			}
+			let view = &chunk_mask.view_bits::<Lsb0>()[..T::LANES * ratio];
+			res2.extend_from_bitslice(view);
+			i += reg_width;
+		}
 	}
 
-	let mut rem_i = i;
+	let mut rem_i = i.div_ceil(alignment) * alignment;
 
 	while rem_i + elem_size <= bytes.len() {
-		if rem_i % alignment == 0 {
-			let value = T::from_bytes(get!(bytes, rem_i .. rem_i + elem_size));
-			res2.push(T::matches(&cond, value));
-		}
-		rem_i += 1;
+		let value = T::from_bytes(get!(bytes, rem_i .. rem_i + elem_size));
+		res2.push(T::matches(&cond, value));
+		rem_i += alignment;
 	}
 
 	res2
@@ -240,25 +288,6 @@ pub trait ArrayScanExt {
 
 	fn find_range<T: Scannable>(&self, lo: T, hi: T, alignment: usize) -> MatchMask {
 		self.scan_for(ScanCondition::Range(lo, hi), alignment)
-	}
-
-	fn find_range_dual<T: Scannable + FromU128>(&self, lo: i128, hi: i128, alignment: usize) -> MatchMask {
-		let bits: usize = <T as ToSimd>::SIZE * 8;
-
-		let range_min = -(1 << (bits - 1));
-		let range_max = (1 << bits) - 1;
-
-		let clamped_lo = lo.clamp(range_min, range_max) as _;
-		let clamped_hi = hi.clamp(range_min, range_max) as _;
-
-		let thing_lo: T = T::from_u128(clamped_lo);
-		let thing_hi: T = T::from_u128(clamped_hi);
-
-		match clamped_lo.cmp(&clamped_hi) {
-			Ordering::Equal   => self.scan_for(ScanCondition::Eq(thing_lo), alignment),
-			Ordering::Less    => self.scan_for(ScanCondition::Range(thing_lo, thing_hi), alignment),
-			Ordering::Greater => self.scan_for(ScanCondition::WrappingRange(thing_lo, thing_hi), alignment),
-		}
 	}
 
 	fn find_pattern(&self, needle: &[u8], alignment: usize) -> MatchMask;

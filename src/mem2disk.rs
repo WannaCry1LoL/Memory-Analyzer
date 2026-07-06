@@ -1,9 +1,8 @@
 use crate::utils::TriState;
 use crate::utils::TriState::{DontCare, False, True};
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::{fs, slice};
-use std::path::PathBuf;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_PRIVATE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_PROTECTION_FLAGS, PAGE_READWRITE, PAGE_WRITECOPY};
 
@@ -83,86 +82,75 @@ pub struct ScanDiskManager {
 }
 
 impl ScanDiskManager {
-
 	fn new(handle: HANDLE, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
 		let mut dir = std::env::temp_dir();
 		dir.push("MemScanner");
-		fs::create_dir(&dir).unwrap();
+		match fs::create_dir(&dir) {
+			Ok(()) => {}
+			Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+			Err(e) => return Err(e),
+		}
 
-		let mut file_1: PathBuf = dir.iter().collect();
-		file_1.push("");
-		let mut file_2: PathBuf = dir.iter().collect();
+		let pid = std::process::id();
+		let initial_scan_file = OpenOptions::new()
+			.read(true).write(true).create(true).truncate(true)
+			.open(dir.join(format!("initial_{pid}.dat")))?;
 
-		let initial_scan_file =
-			OpenOptions::new()
-				.read(true)
-				.write(true)
-				.create_new(true)
-				.open(file_1)?;
+		let scan_file = OpenOptions::new()
+			.read(true).write(true).create(true).truncate(true)
+			.open(dir.join(format!("scan_{pid}.dat")))?;
 
-		let scan_file =
-			OpenOptions::new()
-				.read(true)
-				.write(true)
-				.create_new(true)
-				.open(file_2)?;
-
-		Ok(ScanDiskManager {
-			handle,
-			initial_scan_file,
-			scan_file,
-			flags
-		})
+		Ok(ScanDiskManager { handle, initial_scan_file, scan_file, flags })
 	}
 
-	pub fn dump_memory_blocks(&self) -> std::io::Result<Vec<BlockDescriptor>> {
+	pub fn enumerate_blocks(&self) -> Vec<BlockDescriptor> {
 		let max_addr = self.flags.end_address as _;
-		let mut raw_blocks = Vec::new();
-		let mut base_addr= self.flags.start_address as _;
+		let mut blocks = Vec::new();
+		let mut base_addr = self.flags.start_address as _;
 		let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
 
-		while base_addr < max_addr {
-			unsafe { VirtualQueryEx(
-				self.handle,
-				Some(base_addr),
-				&mut info,
-				size_of::<MEMORY_BASIC_INFORMATION>(),
-			) };
+		loop {
+			let written = unsafe {
+				VirtualQueryEx(self.handle, Some(base_addr), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+			};
+			if written == 0 || base_addr as usize >= max_addr { break; }
 
 			if self.flags.page_flags_match(info.Protect)
 				&& info.State == MEM_COMMIT
 				&& matches!(info.Type, MEM_PRIVATE | MEM_IMAGE) {
-				raw_blocks.push(BlockDescriptor::new(base_addr as usize, info.RegionSize));
+				blocks.push(BlockDescriptor::new(base_addr as usize, info.RegionSize));
 			}
-
 			base_addr = unsafe { base_addr.byte_add(info.RegionSize) };
 		}
-		let amount = raw_blocks.len();
-		let mut curr_offset = size_of::<FileHeader>() + amount * size_of::<BlockDescriptor>();
 
-		for val in &mut raw_blocks {
-			val.file_base = curr_offset;
-			curr_offset += val.size;
+		let mut curr_offset = size_of::<FileHeader>() + blocks.len() * size_of::<BlockDescriptor>();
+		for b in &mut blocks {
+			b.file_base = curr_offset;
+			curr_offset += b.size;
 		}
+		blocks
+	}
 
-		let header = FileHeader::new(amount);
+	pub fn write_header(&mut self, blocks: &[BlockDescriptor]) -> std::io::Result<()> {
+		let header = FileHeader::new(blocks.len());
+		self.initial_scan_file.seek(SeekFrom::Start(0))?;
 		let mut writer = BufWriter::new(&self.initial_scan_file);
 		unsafe {
-			let header_bytes = slice::from_raw_parts(
-				&raw const header as _,
-				size_of::<FileHeader>()
-			);
-			writer.write_all(header_bytes)?;
-
-			if !raw_blocks.is_empty() {
-				let block_bytes = slice::from_raw_parts(
-					raw_blocks.as_ptr() as _,
-					amount * size_of::<BlockDescriptor>()
-				);
-				writer.write_all(block_bytes)?;
+			writer.write_all(slice::from_raw_parts(&raw const header as _, size_of::<FileHeader>()))?;
+			if !blocks.is_empty() {
+				writer.write_all(slice::from_raw_parts(blocks.as_ptr() as _, blocks.len() * size_of::<BlockDescriptor>()))?;
 			}
 		}
-		writer.flush()?;
-		Ok(raw_blocks)
+		writer.flush()
+	}
+
+	pub fn write_block(&mut self, desc: &BlockDescriptor, bytes: &[u8]) -> std::io::Result<()> {
+		debug_assert_eq!(bytes.len(), desc.size);
+		self.initial_scan_file.seek(SeekFrom::Start(desc.file_base as u64))?;
+		self.initial_scan_file.write_all(bytes)
+	}
+
+	pub fn append_matches(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+		self.scan_file.write_all(bytes)
 	}
 }

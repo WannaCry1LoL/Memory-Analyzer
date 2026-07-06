@@ -1,30 +1,132 @@
-use crate::errors::{MemoryReadError, MemoryScanError};
+use crate::errors::MemoryScanError;
 use crate::matches::MatchingState;
 use crate::mem2disk::{BlockDescriptor, DumpFlags, ScanDiskManager};
-use crate::win_helpers::read_bytes;
-use windows::Win32::Foundation::HANDLE;
+use crate::num_helpers::{ArrayScanExt, FromU128, ScanCondition, Scannable};
+use crate::process::Process;
+use crate::simd_types::ToSimd;
+use crate::utils::{get, MatchMask};
+
+#[derive(Debug, Clone, Copy)]
+pub enum IntCondition {
+	Eq(i128),
+	NotEq(i128),
+	Range(i128, i128),
+	FuzzyEq(i128, i128),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FloatCondition {
+	Eq(f64),
+	NotEq(f64),
+	Range(f64, f64),
+	FuzzyEq(f64, f64),
+}
 
 #[derive(Debug, Clone)]
 pub enum ValueType {
-	Binary,
-	Byte,
-	TwoBytes,
-	FourBytes,
-	// EightBytes,
-	Float,
-	Double,
-	ByteArray
+	Byte(IntCondition),
+	TwoBytes(IntCondition),
+	FourBytes(IntCondition),
+	EightBytes(IntCondition),
+	Float(FloatCondition),
+	Double(FloatCondition),
+	ByteArray(Vec<u8>),
 }
 
-impl ValueType {
-	pub const fn default_alignment(&self) -> usize {
-		match self {
-			ValueType::Binary | ValueType::Byte | ValueType::ByteArray => 1,
-			ValueType::TwoBytes => 2,
-			ValueType::FourBytes | ValueType::Float | ValueType::Double => 4,
+#[derive(Debug, Clone)]
+pub struct ScanRequest {
+	pub value_type: ValueType,
+	pub compare_to_first_scan: bool,
+	pub freeze_process: bool
+}
+
+fn to_bit_pattern<T: Scannable + FromU128>(x: i128) -> T {
+	let bits = <T as ToSimd>::SIZE * 8;
+	let range_min = -(1i128 << (bits - 1));
+	let range_max = (1i128 << bits) - 1;
+	T::from_u128(x.clamp(range_min, range_max) as _)
+}
+
+impl<T: Scannable + FromU128> From<IntCondition> for ScanCondition<T> {
+	fn from(x: IntCondition) -> Self {
+		match x {
+			IntCondition::Range(lo, hi) => ScanCondition::from_logical_range(lo, hi),
+			IntCondition::Eq(n) => ScanCondition::<T>::Eq(to_bit_pattern(n)),
+			IntCondition::NotEq(n) => ScanCondition::<T>::NotEq(to_bit_pattern(n)),
+			IntCondition::FuzzyEq(n, eps) => ScanCondition::<T>::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps)),
 		}
 	}
 }
+
+impl From<FloatCondition> for ScanCondition<f32> {
+	fn from(x: FloatCondition) -> Self {
+		match x {
+			FloatCondition::Eq(n) => ScanCondition::Eq(n as f32),
+			FloatCondition::NotEq(n) => ScanCondition::NotEq(n as f32),
+			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo as f32, hi as f32),
+			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n as f32, eps as f32),
+		}
+	}
+}
+
+impl From<FloatCondition> for ScanCondition<f64> {
+	fn from(x: FloatCondition) -> Self {
+		match x {
+			FloatCondition::Eq(n) => ScanCondition::Eq(n),
+			FloatCondition::NotEq(n) => ScanCondition::NotEq(n),
+			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo, hi),
+			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n, eps),
+		}
+	}
+}
+
+impl ScanRequest {
+	pub fn default_alignment(&self) -> usize {
+		match &self.value_type {
+			ValueType::Byte(_) => 1,
+			ValueType::TwoBytes(_) => 2,
+			ValueType::FourBytes(_) | ValueType::EightBytes(_) | ValueType::Float(_) | ValueType::Double(_)=> 4,
+			ValueType::ByteArray(_) => 1,
+		}
+	}
+
+	fn element_size(&self) -> usize {
+		match &self.value_type {
+			ValueType::Byte(_) => size_of::<u8>(),
+			ValueType::TwoBytes(_) => size_of::<u16>(),
+			ValueType::FourBytes(_) => size_of::<u32>(),
+			ValueType::EightBytes(_) => size_of::<u64>(),
+			ValueType::Float(_) => size_of::<f32>(),
+			ValueType::Double(_) => size_of::<f64>(),
+			ValueType::ByteArray(p) => p.len(),
+		}
+	}
+
+	fn run(&self, bytes: &[u8], alignment: usize) -> MatchMask {
+		match &self.value_type {
+			ValueType::Byte(c) => bytes.scan_for::<u8>((*c).into(), alignment),
+			ValueType::TwoBytes(c) => bytes.scan_for::<u16>((*c).into(), alignment),
+			ValueType::FourBytes(c) => bytes.scan_for::<u32>((*c).into(), alignment),
+			ValueType::EightBytes(c) => bytes.scan_for::<u64>((*c).into(), alignment),
+			ValueType::Float(c) => bytes.scan_for::<f32>((*c).into(), alignment),
+			ValueType::Double(c) => bytes.scan_for::<f64>((*c).into(), alignment),
+			ValueType::ByteArray(p) => bytes.find_pattern(p, alignment),
+		}
+	}
+
+	fn test_bytes(&self, bytes: &[u8]) -> bool {
+		match &self.value_type {
+			ValueType::Byte(c) => u8::matches(&(*c).into(), u8::from_bytes(bytes)),
+			ValueType::TwoBytes(c) => u16::matches(&(*c).into(), u16::from_bytes(bytes)),
+			ValueType::FourBytes(c) => u32::matches(&(*c).into(), u32::from_bytes(bytes)),
+			ValueType::EightBytes(c) => u64::matches(&(*c).into(), u64::from_bytes(bytes)),
+			ValueType::Float(c) => f32::matches(&(*c).into(), f32::from_bytes(bytes)),
+			ValueType::Double(c) => f64::matches(&(*c).into(), f64::from_bytes(bytes)),
+			ValueType::ByteArray(pattern) => bytes == pattern.as_slice(),
+		}
+	}
+}
+
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -44,54 +146,107 @@ impl Default for ScanOptions {
 #[derive(Debug, Clone)]
 pub struct MemoryScannerOptions {
 	pub scan_options: ScanOptions,
-	pub dump_options: DumpFlags,
-	pub value_type: ValueType
+	pub dump_options: DumpFlags
 }
 
 impl MemoryScannerOptions {
-	const fn get_alignment(&self) -> usize {
-		if self.scan_options.use_custom_alignment { self.scan_options.custom_alignment } else { self.value_type.default_alignment() }
+	pub fn resolve_alignment(&self, or: &ScanRequest) -> usize {
+		if self.scan_options.use_custom_alignment { self.scan_options.custom_alignment } else { or.default_alignment() }
 	}
 }
 
 pub struct MemoryScanner {
 	pub file_manager: ScanDiskManager,
-	pub handle: HANDLE,
+	pub process: Process,
 	pub state: MatchingState,
 	pub options: MemoryScannerOptions,
 }
-// TODO: figure out how to represent scan pass
-// TODO: write scan pass to disk
+
 // TODO: narrow scans
 
 impl MemoryScanner {
-	#[inline]
-	unsafe fn get_chunk(&self, block_descriptor: BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
-		let mut buffer = vec![0u8; block_descriptor.size];
+	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
+		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?; // maybe move this somewhere else
+		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
 
-		let res = read_bytes(
-			self.handle,
-			block_descriptor.virtual_address as _,
-			buffer.as_mut_ptr(),
-			block_descriptor.size
-		);
+		let alignment = self.options.resolve_alignment(&request);
+		let element_size = request.element_size();
+		let blocks = self.file_manager.enumerate_blocks();
+		let mut new_state = MatchingState::new(alignment, element_size);
 
-		res?;
-		Ok(buffer)
-	}
+		//self.file_manager.write_header(&blocks).map_err(MemoryScanError::MemoryDumpFailed)?;
 
+		for desc in &blocks {
+			let mem = self.process.get_chunk(desc).map_err(MemoryScanError::MemoryReadFailed)?;
+			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
 
-	pub fn scan(&mut self, ) -> Result<(), MemoryScanError> {
-		let res = self.file_manager.dump_memory_blocks().map_err(|e| MemoryScanError::MemoryDumpFailed(e))?;
-		let alignment = self.options.get_alignment();
-		let mut new_state: MatchingState = MatchingState::new(alignment);
+			let mask = request.run(&mem, alignment);
+			if mask.count_ones() == 0 { continue; }
 
-		for desc in res {
-			let mem = unsafe { self.get_chunk(desc).unwrap_unchecked() } ; // TODO
+			let matched: Vec<u8> = mask
+				.iter_ones()
+				.flat_map(|i| get!(mem, i * alignment .. i * alignment + element_size).iter().copied())
+				.collect();
 
+			//self.file_manager.append_matches(&matched).map_err(MemoryScanError::MemoryDumpFailed)?;
+			new_state.push_block(desc.virtual_address, mask, &matched);
 		}
 
 		self.state = new_state;
+		Ok(())
+	}
+
+	pub fn narrow(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
+		let alignment = self.state.alignment;
+		let elem_size = request.element_size();
+
+		if elem_size != self.state.elem_size {
+			return Err(MemoryScanError::IncompatibleScanType);
+		}
+
+		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
+
+		let mut new_state = MatchingState::new(alignment, elem_size);
+
+		for block in &self.state.blocks {
+			let mask_len = block.match_mask.len();
+			if mask_len == 0 { continue; }
+
+			let read_size = (mask_len - 1) * alignment + elem_size;
+			let desc = BlockDescriptor::new(block.base_address, read_size);
+
+			let Ok(mem) = self.process.get_chunk(&desc) else {
+				continue
+			};
+
+			let mut new_mask = MatchMask::repeat(false, mask_len);
+
+			let old_count = block.match_mask.count_ones();
+			let mut current_values = Vec::with_capacity(old_count * elem_size);
+			let mut initial_values = Vec::with_capacity(old_count * elem_size);
+
+			for (k, i) in block.match_mask.iter_ones().enumerate() {
+				let offset = i * alignment;
+				let bytes = get!(mem, offset .. offset + elem_size) ;
+
+				if request.test_bytes(bytes) {
+					new_mask.set(i, true);
+					current_values.extend_from_slice(bytes);
+
+					let old_off = block.data_offset + k * elem_size;
+					initial_values.extend_from_slice(get!(&self.state.initial, old_off .. old_off + elem_size));
+				}
+			}
+
+			if new_mask.count_ones() > 0 {
+				new_state.push_narrowed_block(block.base_address, new_mask, &initial_values, &current_values);
+			}
+		}
+
+		new_state.data.shrink_to_fit();
+		new_state.initial.shrink_to_fit();
+		self.state = new_state;
+
 		Ok(())
 	}
 }

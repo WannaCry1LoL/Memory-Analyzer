@@ -18,10 +18,20 @@ pub enum ProcessError {
 	Unknown,
 }
 
+pub enum ProcessOperationError {
+	/// Suspend failed because the own process may not be suspended
+	CannotSuspendSelf,
+	SuspendFailed(NTSTATUS),
+	ResumeFailed(NTSTATUS)
+}
+
 #[derive(Debug)]
 pub enum MemoryScanError {
 	/// The memory dump failed because an error occured while dumping process memory
 	MemoryDumpFailed(std::io::Error),
+	MemoryReadFailed(MemoryReadError),
+	HandleInitFailed,
+	IncompatibleScanType,
 }
 
 #[derive(Debug)]

@@ -1,11 +1,57 @@
-use crate::errors::ProcessError;
-use crate::win_helpers::get_process_image_path;
-use std::convert::{TryFrom, TryInto};
+use crate::errors::{MemoryReadError, ProcessError, ProcessOperationError};
+use crate::externs::{IntoResult, NtResumeProcess, NtSuspendProcess};
+use crate::mem2disk::BlockDescriptor;
+use crate::win_helpers::{get_process_image_path, read_bytes};
+use std::convert::TryFrom;
 use sysinfo::Pid;
-use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, HANDLE, HWND};
-use windows::Win32::System::Threading::{
-	GetProcessHandleFromHwnd, GetProcessId, OpenProcess, PROCESS_ALL_ACCESS
-};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, E_ACCESSDENIED, HANDLE, HWND, LPARAM, RECT};
+use windows::Win32::System::Threading::{GetProcessId, OpenProcess, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW};
+
+struct WindowSearchState { found_windows: Vec<HWND>, }
+
+fn is_valid_target_window(hwnd: HWND) -> bool { unsafe {
+	if !IsWindowVisible(hwnd).as_bool()
+		|| IsIconic(hwnd).as_bool()
+		|| (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW.0 as i32) != 0
+	{
+		return false;
+	}
+
+	let mut rect = RECT::default();
+	if GetWindowRect(hwnd, &mut rect).is_err() { return false; }
+	if ( rect.right - rect.left ) <= 0 || ( rect.bottom - rect.top ) <= 0 { return false; }
+
+	let mut buffer = [0u16; 256];
+	let len = GetWindowTextW(hwnd, &mut buffer) as usize;
+	if len == 0 { return false; }
+	let title = String::from_utf16_lossy(&buffer[..len]);
+	if title.trim().is_empty() { return false; }
+
+	true
+} }
+
+unsafe extern "system" fn enum_windows_filter_callback(hwnd: HWND, l_param: LPARAM) -> BOOL { unsafe {
+	let Some(state) = (l_param.0 as *mut WindowSearchState).as_mut() else {
+		return BOOL(1)
+	};
+
+	if is_valid_target_window(hwnd) { state.found_windows.push(hwnd); }
+
+	BOOL(1)
+} }
+
+pub struct SuspendGuard<'a> {
+	process: &'a Process,
+}
+
+impl Drop for SuspendGuard<'_> {
+	fn drop(&mut self) {
+		let _ = self.process.resume();
+	}
+}
+
 
 type ErrorType = ProcessError;
 
@@ -26,29 +72,30 @@ impl Process {
 			return Err(ErrorType::InvalidPid);
 		}
 		unsafe {
-			let new_handle = OpenProcess(
-				PROCESS_ALL_ACCESS,
+			let res = OpenProcess(
+				PROCESS_QUERY_LIMITED_INFORMATION,
 				false,
 				pid
 			);
 
-			if let Ok(handle) = new_handle {
-				let path = get_process_image_path(handle).unwrap_or_default();
-				let image_name = path.rsplit_once('/').map(|(_, p)| p).unwrap_or_default().to_string();
-				Ok(
-					Process {
-						handle,
-						pid: Pid::from_u32(pid),
-						image_path: path,
-						image_name,
-					}
-				)
-			} else {
-				Err(match GetLastError() {
-					ERROR_ACCESS_DENIED => ErrorType::NoAccess,
-					_ => ErrorType::Unknown
-				})
-			}
+			let handle = res.map_err(|x| match x.code() {
+				E_ACCESSDENIED => ErrorType::NoAccess,
+				_ => ErrorType::Unknown
+			})?;
+
+			let path = get_process_image_path(handle).unwrap_or_default();
+			let image_name = path.rsplit_once('/').map(|(_, p)| p).unwrap_or_default().to_string();
+
+			CloseHandle(handle).ok();
+
+			Ok(
+				Process {
+					handle: Default::default(),
+					pid: Pid::from_u32(pid),
+					image_path: path,
+					image_name,
+				}
+			)
 		}
 	}
 
@@ -66,8 +113,43 @@ impl Process {
 				})
 			}
 			Self::from_pid_raw(proc_id)
-
 		}
+	}
+
+	pub fn get_valid_windows_processes() -> Vec<Process> {
+		let mut state = WindowSearchState {
+			found_windows: Vec::new(),
+		};
+
+		unsafe {
+			let l_param = LPARAM(&raw mut state as _);
+			let _ = EnumWindows(Some(enum_windows_filter_callback), l_param);
+		}
+
+		state.found_windows
+			.into_iter()
+			.filter_map(|hwnd| Process::try_from(hwnd).ok())
+			.collect()
+	}
+
+	pub fn init_handle(&mut self) -> Result<(), ErrorType> {
+		if self.handle.is_invalid() {
+			unsafe {
+				let res = OpenProcess(
+					PROCESS_ALL_ACCESS,
+					false,
+					self.pid.as_u32(),
+				);
+
+				let res2 = res.map_err(|x| match x.code() {
+					E_ACCESSDENIED => ErrorType::NoAccess,
+					_ => ErrorType::Unknown
+				})?;
+
+				self.handle = res2;
+			}
+		}
+		Ok(())
 	}
 
 	pub fn get_handle(&self) -> HANDLE {
@@ -76,6 +158,41 @@ impl Process {
 
 	pub fn get_pid(&self) -> Pid {
 		self.pid
+	}
+
+	#[inline]
+	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
+		debug_assert!(!self.handle.is_invalid());
+		let mut buffer = vec![0u8; block_descriptor.size];
+		let res = read_bytes(
+			self.handle,
+			block_descriptor.virtual_address as _,
+			buffer.as_mut_ptr(),
+			block_descriptor.size
+		);
+
+		res?;
+		Ok(buffer)
+	}
+
+	pub fn suspend(&self) -> Result<(), ProcessOperationError> {
+		assert!(!self.handle.is_invalid());
+
+		if self.pid.as_u32() == std::process::id() { return Err(ProcessOperationError::CannotSuspendSelf) }
+		let res = unsafe { NtSuspendProcess(self.handle) };
+		res.into_result().map_err(ProcessOperationError::SuspendFailed)
+	}
+
+	pub fn resume(&self) -> Result<(), ProcessOperationError> {
+		assert!(!self.handle.is_invalid());
+
+		let res = unsafe { NtResumeProcess(self.handle) };
+		res.into_result().map_err(ProcessOperationError::ResumeFailed)
+	}
+
+	pub fn suspend_guard(&self) -> Result<SuspendGuard<'_>, ProcessOperationError> {
+		self.suspend()?;
+		Ok(SuspendGuard { process: self })
 	}
 }
 
@@ -94,17 +211,9 @@ impl TryFrom<HWND> for Process {
 			if value.is_invalid() {
 				return Err(ErrorType::InvalidHWND);
 			}
-			let handle = GetProcessHandleFromHwnd(value);
-			Process::try_from(handle)
+			let mut res = 0u32;
+			let _ = GetWindowThreadProcessId(value, Some(&mut res));
+			Process::from_pid_raw(res)
 		}
 	}
 }
-//
-// impl TryFrom<Pid> for Process {
-//
-// }
-//
-// impl TryFrom<&str> for Process {
-//
-// }
-//
