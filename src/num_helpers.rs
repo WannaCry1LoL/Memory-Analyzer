@@ -65,6 +65,14 @@ impl<T> ScanCondition<T> where T : Scannable {
 	pub	fn default_alignment(&self) -> usize {
 		<T as Scannable>::DEFAULT_ALIGNMENT
 	}
+
+	pub fn from_greater_than(value: T) -> Self {
+		Self::Range(value, T::MAX)
+	}
+
+	pub fn from_smaller_than(value: T) -> Self {
+		Self::Range(T::MIN, value)
+	}
 }
 
 impl<T> ScanCondition<T> where T : Scannable + FromU128 {
@@ -91,6 +99,8 @@ impl<T> ScanCondition<T> where T : Scannable + FromU128 {
 pub trait Scannable : PartialEq + PartialOrd + ToSimd + 'static {
 	type Vector = <Self as ToSimd>::SimdType;
 	const DEFAULT_ALIGNMENT: usize = size_of::<Self>();
+	const MAX: Self;
+	const MIN: Self;
 
 	fn load(bytes: &[u8]) -> Self::Vector {
 		let ptr = bytes.as_ptr() as _;
@@ -191,6 +201,8 @@ macro_rules! impl_scannable_numeric {
     ($($t:ty),*) => {
         $(
             impl Scannable for $t {
+	            const MIN: Self = <$t>::MIN;
+	            const MAX: Self = <$t>::MAX;
 				fn eval(cond: &ScanCondition<Self>, v: Self::Vector) -> u64 {
 					match *cond {
 						ScanCondition::Eq(n) => v.simd_eq(Self::Vector::splat(n)).to_bitmask(),
@@ -228,6 +240,8 @@ macro_rules! impl_scannable_float {
     ($($t:ty),*) => {
         $(
             impl Scannable for $t {
+	            const MIN: Self = <$t>::MIN;
+	            const MAX: Self = <$t>::MAX;
 	            fn eval(cond: &ScanCondition<Self>, v: Self::Vector) -> u64 {
 	                match *cond {
 	                    ScanCondition::Eq(n) => v.simd_eq(Self::Vector::splat(n)).to_bitmask(),

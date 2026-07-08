@@ -3,7 +3,6 @@ use crate::win_helpers::{enum_proc_info, EnumerationState};
 use bitvec::vec::BitVec;
 use std::collections::HashMap;
 
-
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
 
 pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
@@ -33,9 +32,9 @@ pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum TriState {
-	DontCare = 2,
-	True = 1,
 	False = 0,
+	True = 1,
+	DontCare = 2,
 }
 
 impl TriState {
@@ -44,6 +43,14 @@ impl TriState {
 			DontCare => true,
 			True => actual,
 			False => !actual,
+		}
+	}
+
+	pub fn to_str(&self) -> &'static str {
+		match self {
+			True => "x",
+			False => " ",
+			DontCare => "-",
 		}
 	}
 }
