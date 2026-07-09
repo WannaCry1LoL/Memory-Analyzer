@@ -72,56 +72,6 @@ impl From<bool> for TriState {
 	fn from(v: bool) -> TriState { if v { True } else { False } }
 }
 
-pub struct HandleGuard<'a> {
-	handle: &'a mut HANDLE,
-}
-
-impl Drop for HandleGuard<'_> {
-	fn drop(&mut self) { let _ = unsafe { CloseHandle(*self.handle) }; }
-}
-
-impl Deref for HandleGuard<'_> {
-	type Target = HANDLE;
-	fn deref(&self) -> &HANDLE { self.handle }
-}
-
-pub fn enable_debug_privilege() -> Result<(), ElevationError> {
-	unsafe {
-		let mut h_token = HANDLE::default();
-
-		OpenProcessToken(
-			GetCurrentProcess(),
-			TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-			&mut h_token
-		)?;
-
-		let handle = HandleGuard { handle: &mut h_token };
-
-		let mut luid = LUID::default();
-
-		LookupPrivilegeValueW(None, w!("SeDebugPrivilege"), &mut luid)?;
-
-		let mut tp = TOKEN_PRIVILEGES::default();
-		tp.PrivilegeCount = 1;
-		tp.Privileges[0].Luid = luid;
-		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-		AdjustTokenPrivileges(
-			*handle,
-			false,
-			Some(&tp),
-			size_of::<TOKEN_PRIVILEGES>() as _,
-			None,
-			None,
-		)?;
-
-		match GetLastError() {
-			ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
-			_ => Ok(())
-		}
-	}
-}
-
 macro_rules! get {
 	($e1:expr, $e2:expr) => { unsafe { $e1.get_unchecked($e2) } };
 }

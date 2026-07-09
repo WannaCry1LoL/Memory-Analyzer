@@ -1,11 +1,14 @@
 use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
-use crate::errors::{MemoryReadError, MemoryWriteError, ProcessImagePathError};
+use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessImagePathError};
 use crate::externs::*;
 use std::mem::MaybeUninit;
 use std::{mem, ptr, ptr::null_mut};
-use windows::Win32::Foundation::{GetLastError, HANDLE, STATUS_INFO_LENGTH_MISMATCH};
+use std::ops::Deref;
+use windows::core::w;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID, STATUS_INFO_LENGTH_MISMATCH};
+use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
 
 #[derive(PartialEq)]
 pub enum EnumerationState<T> {
@@ -129,4 +132,55 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATI
 	}
 
 	None
+}
+
+
+pub struct HandleGuard<'a> {
+	handle: &'a mut HANDLE,
+}
+
+impl Drop for HandleGuard<'_> {
+	fn drop(&mut self) { let _ = unsafe { CloseHandle(*self.handle) }; }
+}
+
+impl Deref for HandleGuard<'_> {
+	type Target = HANDLE;
+	fn deref(&self) -> &HANDLE { self.handle }
+}
+
+pub fn enable_debug_privilege() -> Result<(), ElevationError> {
+	unsafe {
+		let mut h_token = HANDLE::default();
+
+		OpenProcessToken(
+			GetCurrentProcess(),
+			TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+			&mut h_token
+		)?;
+
+		let handle = HandleGuard { handle: &mut h_token };
+
+		let mut luid = LUID::default();
+
+		LookupPrivilegeValueW(None, w!("SeDebugPrivilege"), &mut luid)?;
+
+		let mut tp = TOKEN_PRIVILEGES::default();
+		tp.PrivilegeCount = 1;
+		tp.Privileges[0].Luid = luid;
+		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+		AdjustTokenPrivileges(
+			*handle,
+			false,
+			Some(&tp),
+			size_of::<TOKEN_PRIVILEGES>() as _,
+			None,
+			None,
+		)?;
+
+		match GetLastError() {
+			ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
+			_ => Ok(())
+		}
+	}
 }
