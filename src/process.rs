@@ -52,14 +52,13 @@ impl Drop for SuspendGuard<'_> {
 	}
 }
 
-
 type ErrorType = ProcessError;
 
 pub struct Process {
 	handle: HANDLE,
 	pid: Pid,
 	image_name: String,
-	image_path: String,
+	image_path: String
 }
 
 impl Process {
@@ -93,7 +92,7 @@ impl Process {
 					handle: Default::default(),
 					pid: Pid::from_u32(pid),
 					image_path: path,
-					image_name,
+					image_name
 				}
 			)
 		}
@@ -194,13 +193,15 @@ impl Process {
 		self.suspend()?;
 		Ok(SuspendGuard { process: self })
 	}
+
+	pub fn format_name(&self) -> String {
+		format!("{:08X}-{}", self.pid.as_u32(), self.image_name)
+	}
 }
 
 impl TryFrom<HANDLE> for Process {
 	type Error = ErrorType;
-	fn try_from(handle: HANDLE) -> Result<Self, Self::Error> {
-		Process::from_process_handle(handle)
-	}
+	fn try_from(handle: HANDLE) -> Result<Self, Self::Error> { Self::from_process_handle(handle) }
 }
 
 impl TryFrom<HWND> for Process {
@@ -213,7 +214,7 @@ impl TryFrom<HWND> for Process {
 			}
 			let mut res = 0u32;
 			let _ = GetWindowThreadProcessId(value, Some(&mut res));
-			Process::from_pid_raw(res)
+			Self::from_pid_raw(res)
 		}
 	}
 }

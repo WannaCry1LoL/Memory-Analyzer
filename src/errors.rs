@@ -61,3 +61,23 @@ pub enum ProcessImagePathError {
 	InvalidUtf16ImagePath,
 	Unknown(WIN32_ERROR)
 }
+
+#[derive(Debug)]
+pub enum ElevationError {
+	/// Failed to lookup LUID for SeDebugPrivilege
+	PrivilegeLookupFailed,
+	/// Windows reports that the privilege was not assigned.
+	PrivilegeNotAssigned,
+	Unknown
+}
+
+impl From<windows::core::Error> for ElevationError {
+	fn from(err: windows::core::Error) -> Self {
+		let win32_err = WIN32_ERROR::from_error(&err);
+
+		match win32_err {
+			Some(_) => ElevationError::PrivilegeLookupFailed,
+			None => ElevationError::Unknown
+		}
+	}
+}

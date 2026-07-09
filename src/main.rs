@@ -1,7 +1,5 @@
 #![feature(portable_simd)]
 #![feature(associated_type_defaults)]
-#![feature(integer_casts)]
-#![feature(int_roundings)]
 extern crate core;
 
 mod utils;
@@ -14,6 +12,8 @@ mod errors;
 mod num_helpers;
 mod mem2disk;
 mod simd_types;
+mod ui;
+mod ui_types;
 
 use sysinfo::{Pid, System};
 
