@@ -135,16 +135,21 @@ fn handle_key_process_select(app: &mut App, code: KeyCode) {
 		KeyCode::Down | KeyCode::Char('j') => app.process_move(1),
 		KeyCode::Char('/') => app.start_edit(FieldTarget::ProcessFilter),
 		KeyCode::Enter => app.attach_selected(),
+		KeyCode::Char('r') => app.refresh_processes(),
 		_ => {}
 	}
 }
 
 fn handle_key_scanner(app: &mut App, code: KeyCode) {
 	match app.focus {
-		Focus::ValueType | Focus::ScanMode => match code {
+		Focus::ValueType | Focus::ScanMode | Focus::RoundingMode => match code {
 			KeyCode::Left | KeyCode::Char('h') => app.cycle_focused_combo(-1),
 			KeyCode::Right | KeyCode::Char('l') => app.cycle_focused_combo(1),
 			KeyCode::Enter => app.cycle_focused_combo(1),
+			_ => {}
+		},
+		Focus::FreezeProcess => match code {
+			KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Right => app.freeze_process = !app.freeze_process,
 			_ => {}
 		},
 		Focus::ValueInput => {
@@ -173,7 +178,8 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			}
 		}
 		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => match code {
-			KeyCode::Enter | KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => app.cycle_focused_tristate(),
+			KeyCode::Enter | KeyCode::Char(' ') => app.cycle_focused_tristate(false),
+			KeyCode::Left => app.cycle_focused_tristate(true),
 			_ => {}
 		},
 		Focus::ScanBtn => {
@@ -183,7 +189,7 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 		}
 		Focus::NextScanBtn => {
 			if code == KeyCode::Enter {
-				app.trigger_scan();
+				app.trigger_next_scan();
 			}
 		}
 		Focus::ResultsList => match code {

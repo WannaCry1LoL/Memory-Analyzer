@@ -13,6 +13,7 @@ use ratatui::{
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use crate::num_helpers::ScanCondition;
 
 const ACCENT: Color = Color::Yellow;
 const EDIT: Color = Color::Green;
@@ -23,6 +24,7 @@ pub enum ScanEvent {
 	Finished {
 		scanner: MemoryScanner,
 		result: Result<(), String>,
+		was_narrow: bool,
 	},
 }
 
@@ -47,9 +49,11 @@ pub struct App {
 	pub alignment: String,
 	pub range_start: String,
 	pub range_end: String,
+	pub freeze_process: bool,
 	pub writable: TriState,
 	pub executable: TriState,
 	pub cow: TriState,
+	pub rounding_mode: RoundingMode,
 
 	pub focus: Focus,
 	pub editing_target: Option<FieldTarget>,
@@ -88,9 +92,11 @@ impl App {
 			alignment: "4".into(),
 			range_start: "0".into(),
 			range_end: "7FFFFFFFFFFFFFFF".into(),
+			freeze_process: false,
 			writable: TriState::True,
 			executable: TriState::DontCare,
 			cow: TriState::False,
+			rounding_mode: RoundingMode::Default,
 
 			focus: Focus::ValueType,
 			editing_target: None,
@@ -130,6 +136,11 @@ impl App {
 		}
 		let idx = (self.process_list_state as i32 + delta).clamp(0, len - 1);
 		self.process_list_state = idx as usize;
+	}
+
+	pub fn refresh_processes(&mut self) {
+		self.processes = Process::get_valid_windows_processes();
+		self.process_list_state = 0;
 	}
 
 	pub fn attach_selected(&mut self) {
@@ -176,9 +187,13 @@ impl App {
 		order.push(Focus::Alignment);
 		order.push(Focus::RangeStart);
 		order.push(Focus::RangeEnd);
+		if self.value_type.is_float() {
+			order.push(Focus::RoundingMode);
+		}
 		order.push(Focus::Writable);
 		order.push(Focus::Executable);
 		order.push(Focus::CopyOnWrite);
+		order.push(Focus::FreezeProcess);
 		order.push(Focus::ScanBtn);
 		if self.has_first_scan {
 			order.push(Focus::NextScanBtn);
@@ -204,17 +219,21 @@ impl App {
 
 	pub fn cycle_focused_combo(&mut self, dir: i32) {
 		match self.focus {
-			Focus::ValueType => self.value_type = self.value_type.cycle(dir),
+			Focus::ValueType => {
+				self.value_type = self.value_type.cycle(dir);
+				self.alignment = self.value_type.natural_alignment().to_string()
+			}
 			Focus::ScanMode => self.scan_mode = self.scan_mode.cycle(dir),
+			Focus::RoundingMode => self.rounding_mode = self.rounding_mode.cycle(dir),
 			_ => {}
 		}
 	}
 
-	pub fn cycle_focused_tristate(&mut self) {
+	pub fn cycle_focused_tristate(&mut self, reverse: bool) {
 		match self.focus {
-			Focus::Writable => self.writable = self.writable.cycle(),
-			Focus::Executable => self.executable = self.executable.cycle(),
-			Focus::CopyOnWrite => self.cow = self.cow.cycle(),
+			Focus::Writable => self.writable = self.writable.cycle(reverse),
+			Focus::Executable => self.executable = self.executable.cycle(reverse),
+			Focus::CopyOnWrite => self.cow = self.cow.cycle(reverse),
 			_ => {}
 		}
 	}
@@ -352,11 +371,17 @@ impl App {
 
 		match self.value_type {
 			UiValueType::Float | UiValueType::Double => {
+				let first = parse_float(&self.value_input)?;
 				let cond = match self.scan_mode {
-					ScanMode::ExactValue => FloatCondition::Eq(parse_float(&self.value_input)?),
-					ScanMode::BiggerThan => FloatCondition::GreaterThan(parse_float(&self.value_input)?),
-					ScanMode::SmallerThan => FloatCondition::LessThan(parse_float(&self.value_input)?),
-					ScanMode::ValueBetween => FloatCondition::Range(parse_float(&self.value_input)?, parse_float(&self.value_input2)?),
+					ScanMode::ExactValue => match self.rounding_mode {
+						RoundingMode::Default => FloatCondition::Range(first - 0.5, (first + 0.5).next_down()),
+						RoundingMode::Extreme => FloatCondition::Range(first - 1.0, (first + 1.0).next_down()),
+						RoundingMode::Truncate if first >= 0.0 => FloatCondition::Range(first, (first + 1.0).next_down()),
+						RoundingMode::Truncate => FloatCondition::Range((first - 1.0).next_up(), first)
+					},
+					ScanMode::BiggerThan => FloatCondition::GreaterThan(first),
+					ScanMode::SmallerThan => FloatCondition::LessThan(first),
+					ScanMode::ValueBetween => FloatCondition::Range(first, parse_float(&self.value_input2)?),
 				};
 				let value_type = match self.value_type {
 					UiValueType::Double => ValueType::Double(cond),
@@ -387,7 +412,20 @@ impl App {
 			}
 		}
 	}
+
 	pub fn trigger_scan(&mut self) {
+		self.start_scan(false);
+	}
+
+	pub fn trigger_next_scan(&mut self) {
+		if !self.has_first_scan {
+			self.status = "No first scan to narrow yet".into();
+			return;
+		}
+		self.start_scan(true);
+	}
+
+	fn start_scan(&mut self, narrow: bool) {
 		if self.is_scanning {
 			self.status = "Scan already in progress...".into();
 			return;
@@ -395,31 +433,21 @@ impl App {
 
 		let req = match self.build_scan_request() {
 			Ok(req) => req,
-			Err(e) => {
-				self.status = e;
-				return;
-			}
+			Err(e) => { self.status = e; return; }
 		};
 
 		if let Some(mut scanner) = self.scanner.take() {
 			self.update_scanner_options(&mut scanner);
 			self.is_scanning = true;
-			self.status = "Scanning...".into();
+			self.status = if narrow { "Narrowing scan...".into() } else { "Scanning...".into() };
 
 			let (tx, rx) = mpsc::channel();
 			self.scan_rx = Some(rx);
 
-			let has_scanned = self.has_first_scan;
-
 			thread::spawn(move || {
-				let res = if has_scanned {
-					scanner.narrow(req)
-				} else {
-					scanner.scan(req)
-				};
-
+				let res = if narrow { scanner.narrow(req) } else { scanner.scan(req) };
 				let result = res.map_err(|e| format!("{:?}", e));
-				let _ = tx.send(ScanEvent::Finished { scanner, result });
+				let _ = tx.send(ScanEvent::Finished { scanner, result, was_narrow: narrow });
 			});
 		}
 	}
@@ -428,22 +456,20 @@ impl App {
 		if let Some(rx) = &self.scan_rx {
 			if let Ok(event) = rx.try_recv() {
 				match event {
-					ScanEvent::Finished { scanner, result } => {
+					ScanEvent::Finished { scanner, result, was_narrow } => {
 						self.is_scanning = false;
 						if self.screen == Screen::Scanner {
 							self.scanner = Some(scanner);
 							match result {
 								Ok(()) => {
 									self.has_first_scan = true;
-									self.scan_count += 1;
+									self.scan_count = if was_narrow { self.scan_count + 1 } else { 1 };
 									self.results_selected = 0;
 									let total = self.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
 									self.status = format!("Found {} matches.", total);
 									self.focus = Focus::ResultsList;
 								}
-								Err(e) => {
-									self.status = format!("Scan error: {}", e);
-								}
+								Err(e) => self.status = format!("Scan error: {}", e),
 							}
 						} else {
 							self.status = "Scan finished, but process was detached.".into();
@@ -559,7 +585,7 @@ fn draw_process_select(f: &mut Frame, app: &App) {
 	f.render_widget(table, chunks[2]);
 
 	let help = Paragraph::new(
-		"\u{2191}/\u{2193} or j/k: move   Enter: attach   /: filter   q: quit",
+		"\u{2191}/\u{2193} or j/k: move   Enter: attach   /: filter   r: refresh   q: quit",
 	)
 		.style(Style::default().fg(DIM))
 		.block(Block::default().borders(Borders::ALL).title(" Help "));
@@ -674,20 +700,26 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 
 	let needs_v2 = app.scan_mode.needs_second_value();
 	let mut constraints = vec![
-		Constraint::Length(3),                                 // value type
-		Constraint::Length(3),                                 // scan mode
+		Constraint::Length(3),                                 // Value type
 	];
+	if app.value_type.is_numeric() {
+		constraints.push(Constraint::Length(3));
+	}
 	if app.scan_mode.needs_value() {
-		constraints.push(Constraint::Length(3));        // value
+		constraints.push(Constraint::Length(3));        // Value
 		if needs_v2 {
-			constraints.push(Constraint::Length(3));    // value2
+			constraints.push(Constraint::Length(3));    // Value2
 		}
 	}
-	constraints.push(Constraint::Length(3));            // alignment
-	constraints.push(Constraint::Length(3));            // range
-	constraints.push(Constraint::Length(3));            // protection flags
-	constraints.push(Constraint::Length(3));            // buttons
-	constraints.push(Constraint::Min(1));               // filler
+	constraints.push(Constraint::Length(3));            // Alignment
+	constraints.push(Constraint::Length(3));            // Range
+	if app.value_type.is_float() {
+		constraints.push(Constraint::Length(3));        // Float rounding mode
+	}
+	constraints.push(Constraint::Length(3));            // Protection flags
+	constraints.push(Constraint::Length(3));            // Freeze process
+	constraints.push(Constraint::Length(3));            // Scan buttons
+	constraints.push(Constraint::Min(1));               // Filler
 
 	let rows = Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
 	let mut idx = 0;
@@ -695,8 +727,10 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 	render_combo(f, rows[idx], "Value Type", app.value_type.label(), box_style(app, Focus::ValueType));
 	idx += 1;
 
-	render_combo(f, rows[idx], "Scan Type", app.scan_mode.label(), box_style(app, Focus::ScanMode));
-	idx += 1;
+	if app.value_type.is_numeric() {
+		render_combo(f, rows[idx], "Scan Type", app.scan_mode.label(), box_style(app, Focus::ScanMode));
+		idx += 1;
+	}
 
 	if app.scan_mode.needs_value() {
 		let label = if needs_v2 { "Value (min)" } else { "Value" };
@@ -719,6 +753,10 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 	render_text_field(f, range_cols[1], "Range End", &field_text(app, FieldTarget::RangeEnd, &app.range_end), box_style(app, Focus::RangeEnd));
 	idx += 1;
 
+	if app.value_type.is_float() {
+		render_combo(f, rows[idx], "Float Rounding Mode", app.rounding_mode.label(), box_style(app, Focus::RoundingMode));
+		idx += 1;
+	}
 	let flag_cols = Layout::default()
 		.direction(Direction::Horizontal)
 		.constraints([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)])
@@ -726,6 +764,9 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 	render_tristate(f, flag_cols[0], "Writable", app.writable, box_style(app, Focus::Writable));
 	render_tristate(f, flag_cols[1], "Executable", app.executable, box_style(app, Focus::Executable));
 	render_tristate(f, flag_cols[2], "Copy-on-Write", app.cow, box_style(app, Focus::CopyOnWrite));
+	idx += 1;
+
+	render_tristate(f, rows[idx], "Freeze Process", app.freeze_process.into(), box_style(app, Focus::FreezeProcess));
 	idx += 1;
 
 	let btn_cols = Layout::default()
@@ -847,7 +888,7 @@ fn draw_saved(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 	let help = match app.focus {
 		Focus::ValueType | Focus::ScanMode => "\u{2190}/\u{2192}: change   Tab: next field",
-		Focus::ValueInput | Focus::ValueInput2 | Focus::Alignment | Focus::RangeStart | Focus::RangeEnd => {
+		Focus::ValueInput | Focus::ValueInput2 | Focus::Alignment | Focus::RangeStart | Focus::RangeEnd | Focus::RoundingMode | Focus::FreezeProcess => {
 			"Enter: edit   Tab: next field"
 		}
 		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => "Enter/\u{2190}\u{2192}: toggle   Tab: next field",

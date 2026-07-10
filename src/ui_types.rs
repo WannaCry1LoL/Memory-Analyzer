@@ -5,6 +5,13 @@ pub enum Screen {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundingMode {
+	Truncate,
+	Default,
+	Extreme
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
 	Normal,
 	Editing,
@@ -19,9 +26,11 @@ pub enum Focus {
 	Alignment,
 	RangeStart,
 	RangeEnd,
+	RoundingMode,
 	Writable,
 	Executable,
 	CopyOnWrite,
+	FreezeProcess,
 	ScanBtn,
 	NextScanBtn,
 	ResultsList,
@@ -83,6 +92,41 @@ impl UiValueType {
 	}
 
 	pub fn cycle(self, dir: i32) -> UiValueType {
+		let all = Self::ALL;
+		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
+		let len = all.len() as i32;
+		all[((idx + dir).rem_euclid(len)) as usize]
+	}
+
+	pub fn natural_alignment(self) -> usize {
+		match self {
+			UiValueType::Byte => 1,
+			UiValueType::Word => 2,
+			UiValueType::Dword => 4,
+			UiValueType::Qword => 8,
+			UiValueType::Float => 4,
+			UiValueType::Double => 8,
+			UiValueType::ArrayOfByte => 1,
+		}
+	}
+}
+
+impl RoundingMode {
+	pub const ALL: [RoundingMode; 3] = [
+		RoundingMode::Default,
+		RoundingMode::Extreme,
+		RoundingMode::Truncate
+	];
+
+	pub fn label(self) -> &'static str {
+		match self {
+			RoundingMode::Default => "Round (Default)",
+			RoundingMode::Extreme => "Round (Extreme)",
+			RoundingMode::Truncate => "Truncate",
+		}
+	}
+
+	pub fn cycle(self, dir: i32) -> Self {
 		let all = Self::ALL;
 		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
 		let len = all.len() as i32;

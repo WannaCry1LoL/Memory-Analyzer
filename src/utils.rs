@@ -75,8 +75,11 @@ impl TriState {
 		}
 	}
 
-	pub fn cycle(self) -> Self {
+	pub fn cycle(self, rev: bool) -> Self {
 		match self {
+			DontCare if rev => False,
+			False if rev => True,
+			True if rev => DontCare,
 			DontCare => True,
 			True => False,
 			False => DontCare,
@@ -85,9 +88,9 @@ impl TriState {
 
 	pub fn label(&self) -> &'static str {
 		match self {
-			True => "x",
-			False => " ",
-			DontCare => "-",
+			True => "Y",
+			False => "N",
+			DontCare => "*",
 		}
 	}
 }
