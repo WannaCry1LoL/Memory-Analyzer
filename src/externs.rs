@@ -4,8 +4,8 @@ use std::hint::unreachable_unchecked;
 use std::ptr::{null, null_mut};
 use crate::utils::Pid;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum NtStatusType {
 	Success = 0,
 	Information = 1,
@@ -172,8 +172,6 @@ impl std::fmt::Display for UnicodeString {
 	}
 }
 
-pub const E_ACCESSDENIED: i32 = -2147024891; // 0x80070005 as i32
-
 pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_PRIVATE: u32 = 0x20000;
 pub const MEM_IMAGE: u32 = 0x1000000;
@@ -275,8 +273,7 @@ pub struct MemoryBasicInformation {
 }
 
 #[repr(C)]
-pub struct SystemBasicProcessInformation
-{
+pub struct SystemBasicProcessInformation {
 	pub next_entry_offset: u32,
 	pub unique_process_id: usize,
 	pub inherited_from_unique_process_id: usize,
@@ -312,7 +309,7 @@ pub struct SystemBasicInformation {
 pub unsafe fn open_process(
 	desired_access: u32,
 	inherit_handle: bool,
-	process_id: u32,
+	process_id: u32
 ) -> Result<Handle, NtStatus> {
 	let mut handle: Handle = Default::default();
 
@@ -344,7 +341,7 @@ pub unsafe fn open_process(
 
 pub unsafe fn open_process_token(
 	process_handle: Handle,
-	desired_access: u32,
+	desired_access: u32
 ) -> Result<Handle, NtStatus> {
 	let mut token_handle: Handle = Default::default();
 
@@ -390,11 +387,10 @@ pub fn virtual_query_ex(
 	process_handle: Handle,
 	base_address: *const c_void,
 ) -> Result<(MemoryBasicInformation, usize), NtStatus> {
-
 	let mut mem_info = unsafe { std::mem::zeroed() };
 	let mut return_length = 0;
 
-	let status = unsafe {
+	unsafe {
 		NtQueryVirtualMemory(
 			process_handle,
 			base_address,
@@ -402,10 +398,8 @@ pub fn virtual_query_ex(
 			&raw mut mem_info as _,
 			size_of::<MemoryBasicInformation>(),
 			&mut return_length,
-		)
-	};
-
-	status.into_result().map(|_| (mem_info, return_length))
+		).into_result().map(|_| (mem_info, return_length))
+	}
 }
 
 pub unsafe fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> { unsafe {
@@ -425,7 +419,7 @@ pub unsafe fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> { 
 
 pub unsafe fn query_full_process_image_name(
 	process_handle: Handle,
-	buffer: &mut [u16],
+	buffer: &mut [u16]
 ) -> Result<u32, NtStatus> { unsafe {
 	let buff_len = buffer.len() * 2;
 	let mut return_length = 0;

@@ -57,15 +57,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 	let mut last_tick = Instant::now();
 
 	loop {
-		// 1. Poll background thread for completed scans
 		app.poll_scan_events();
 
-		// 2. Draw UI
 		if terminal.draw(|f| draw(f, app)).is_err() {
 			return Err(io::Error::new(ErrorKind::Other, "Terminal draw error"));
 		}
 
-		// 3. Handle input
 		let timeout = tick_rate.saturating_sub(last_tick.elapsed());
 		if event::poll(timeout)? {
 			if let Event::Key(key) = event::read()? {
@@ -142,6 +139,18 @@ fn handle_key_process_select(app: &mut App, code: KeyCode) {
 
 fn handle_key_scanner(app: &mut App, code: KeyCode) {
 	match app.focus {
+		Focus::ValueInput => if code == KeyCode::Enter {  app.start_edit(FieldTarget::Value) }
+		Focus::ValueInput2 => if code == KeyCode::Enter { app.start_edit(FieldTarget::Value2) }
+		Focus::Alignment => if code == KeyCode::Enter { app.start_edit(FieldTarget::Alignment) }
+		Focus::RangeStart => if code == KeyCode::Enter { app.start_edit(FieldTarget::RangeStart) }
+		Focus::RangeEnd => if code == KeyCode::Enter { app.start_edit(FieldTarget::RangeEnd) }
+		Focus::ScanBtn => if code == KeyCode::Enter { app.trigger_scan() }
+		Focus::NextScanBtn => if code == KeyCode::Enter { app.trigger_next_scan() }
+		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => match code {
+			KeyCode::Enter | KeyCode::Char(' ') => app.cycle_focused_tristate(false),
+			KeyCode::Left => app.cycle_focused_tristate(true),
+			_ => {}
+		},
 		Focus::ValueType | Focus::ScanMode | Focus::RoundingMode => match code {
 			KeyCode::Left | KeyCode::Char('h') => app.cycle_focused_combo(-1),
 			KeyCode::Right | KeyCode::Char('l') => app.cycle_focused_combo(1),
@@ -152,46 +161,6 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Right => app.freeze_process = !app.freeze_process,
 			_ => {}
 		},
-		Focus::ValueInput => {
-			if code == KeyCode::Enter {
-				app.start_edit(FieldTarget::Value);
-			}
-		}
-		Focus::ValueInput2 => {
-			if code == KeyCode::Enter {
-				app.start_edit(FieldTarget::Value2);
-			}
-		}
-		Focus::Alignment => {
-			if code == KeyCode::Enter {
-				app.start_edit(FieldTarget::Alignment);
-			}
-		}
-		Focus::RangeStart => {
-			if code == KeyCode::Enter {
-				app.start_edit(FieldTarget::RangeStart);
-			}
-		}
-		Focus::RangeEnd => {
-			if code == KeyCode::Enter {
-				app.start_edit(FieldTarget::RangeEnd);
-			}
-		}
-		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => match code {
-			KeyCode::Enter | KeyCode::Char(' ') => app.cycle_focused_tristate(false),
-			KeyCode::Left => app.cycle_focused_tristate(true),
-			_ => {}
-		},
-		Focus::ScanBtn => {
-			if code == KeyCode::Enter {
-				app.trigger_scan();
-			}
-		}
-		Focus::NextScanBtn => {
-			if code == KeyCode::Enter {
-				app.trigger_next_scan();
-			}
-		}
 		Focus::ResultsList => match code {
 			KeyCode::Up | KeyCode::Char('k') => app.results_move(-1),
 			KeyCode::Down | KeyCode::Char('j') => app.results_move(1),
@@ -206,6 +175,6 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			KeyCode::Char('r') => app.start_edit(FieldTarget::SavedDescription),
 			KeyCode::Char('d') | KeyCode::Delete => app.remove_selected_saved(),
 			_ => {}
-		},
+		}
 	}
 }
