@@ -13,3 +13,7 @@ crossterm = "0.29.0"
 codegen-units = 1
 lto = true
 opt-level = 3
+
+[profile.profiling]
+inherits = "release"
+debug = true

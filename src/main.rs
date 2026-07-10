@@ -57,15 +57,13 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 	let mut last_tick = Instant::now();
 
 	loop {
-		// 1. Poll background thread for completed scans
 		app.poll_scan_events();
+		app.poll_worker_events();
 
-		// 2. Draw UI
 		if terminal.draw(|f| draw(f, app)).is_err() {
 			return Err(io::Error::new(ErrorKind::Other, "Terminal draw error"));
 		}
 
-		// 3. Handle input
 		let timeout = tick_rate.saturating_sub(last_tick.elapsed());
 		if event::poll(timeout)? {
 			if let Event::Key(key) = event::read()? {
@@ -77,6 +75,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 
 		if last_tick.elapsed() >= tick_rate {
 			last_tick = Instant::now();
+			app.refresh_saved_values();
 		}
 
 		if app.should_quit {

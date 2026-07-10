@@ -181,7 +181,7 @@ impl MemoryScanner {
 			.map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{:?}", e)))?;
 		let handle = process.get_handle();
 
-		let file_manager = ScanDiskManager::new(handle, options.dump_options)?;
+		let file_manager = ScanDiskManager::new(handle, options.dump_options);
 
 		Ok(Self {
 			file_manager,
@@ -209,12 +209,14 @@ impl MemoryScanner {
 			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
 
 			let mask = request.run(&mem, alignment);
-			if mask.count_ones() == 0 { continue; }
+			let ones = mask.count_ones();
 
-			let matched: Vec<u8> = mask
-				.iter_ones()
-				.flat_map(|i| get!(mem, i * alignment .. i * alignment + element_size).iter().copied())
-				.collect();
+			if ones == 0 { continue; }
+
+			let mut matched = Vec::with_capacity(ones * element_size);
+			for i in mask.iter_ones() {
+				matched.extend_from_slice(get!(mem, i * alignment .. i * alignment + element_size));
+			}
 
 			//self.file_manager.append_matches(&matched).map_err(MemoryScanError::MemoryDumpFailed)?;
 			new_state.push_block(desc.virtual_address, mask, &matched);

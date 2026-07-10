@@ -1,6 +1,6 @@
-use crate::errors::{MemoryReadError, ProcessError, ProcessOperationError};
+use crate::errors::{MemoryReadError, MemoryWriteError, ProcessError, ProcessOperationError};
 use crate::mem2disk::BlockDescriptor;
-use crate::win_helpers::{get_process_image_path, read_bytes};
+use crate::win_helpers::{get_process_image_path, read_bytes, write_bytes};
 use std::convert::TryFrom;
 use crate::utils::Pid;
 use crate::externs::*;
@@ -165,7 +165,8 @@ impl Process {
 	#[inline]
 	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
 		debug_assert!(!self.handle.is_invalid());
-		let mut buffer = vec![0u8; block_descriptor.size];
+		let mut buffer = Vec::with_capacity(block_descriptor.size);
+		unsafe { buffer.set_len(block_descriptor.size) };
 
 		let read_count = read_bytes(
 			self.handle,
@@ -178,6 +179,16 @@ impl Process {
 		Ok(buffer)
 	}
 
+	pub fn write(&self, addr: *mut u8, bytes: &[u8]) -> Result<(), MemoryWriteError> {
+		write_bytes(self.handle, addr, bytes.as_ptr(), bytes.len())
+	}
+
+	pub fn read(&self, addr: *const u8, length: usize) -> Result<Vec<u8>, MemoryReadError> {
+		let mut buf = vec![0u8; length];
+		read_bytes(self.handle, addr, buf.as_mut_ptr(), length)?;
+		Ok(buf)
+	}
+	
 	pub fn suspend(&self) -> Result<(), ProcessOperationError> {
 		assert!(!self.handle.is_invalid());
 
