@@ -70,7 +70,7 @@ impl<T> ScanCondition<T> where T : Scannable {
 		Self::Range(value, T::MAX)
 	}
 
-	pub fn from_smaller_than(value: T) -> Self {
+	pub fn from_less_than(value: T) -> Self {
 		Self::Range(T::MIN, value)
 	}
 }
@@ -151,7 +151,8 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 			let chunk = get!(bytes, i.. i + reg_width);
 			let v = T::load(chunk);
 			let mask = T::eval(&cond, v);
-			res2.extend_from_raw_slice(&[mask]);
+			let view = &mask.view_bits::<Lsb0>()[..T::LANES];
+			res2.extend_from_bitslice(view);
 			i += reg_width;
 		}
 	} else if alignment > elem_size {

@@ -48,6 +48,7 @@ impl MatchingState {
 		debug_assert_eq!(values.len(), mask.count_ones() * self.elem_size);
 		let offset = self.data.len();
 		self.data.extend_from_slice(values);
+		self.initial.extend_from_slice(values);
 		self.blocks.push(MatchingBlock { base_address, match_mask: mask, data_offset: offset });
 	}
 
@@ -75,6 +76,39 @@ impl MatchingState {
 					(addr, &self.data[slice_start..slice_end])
 				})
 			})
+	}
+
+	pub fn get_match_count(&self) -> usize {
+		let len = self.data.len();
+		assert_eq!(len % self.elem_size, 0, "Data ");
+		len / self.elem_size
+	}
+}
+
+impl MatchingState {
+	pub fn total_matches(&self) -> usize {
+		self.blocks.iter().map(|b| b.match_mask.count_ones()).sum()
+	}
+
+	pub fn get_match(&self, index: usize) -> Option<(usize, &[u8], &[u8])> {
+		let mut remaining = index;
+		for block in &self.blocks {
+			let count = block.match_mask.count_ones();
+			if remaining < count {
+				let mut local_idx = 0;
+				for i in block.match_mask.iter_ones() {
+					if local_idx == remaining {
+						let addr = block.base_address + i * self.alignment;
+						let slice_start = block.data_offset + local_idx * self.elem_size;
+						let slice_end = slice_start + self.elem_size;
+						return Some((addr, &self.data[slice_start..slice_end], &self.initial[slice_start..slice_end]));
+					}
+					local_idx += 1;
+				}
+			}
+			remaining -= count;
+		}
+		None
 	}
 }
 

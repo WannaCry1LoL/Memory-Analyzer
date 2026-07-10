@@ -1,12 +1,8 @@
+use std::backtrace::Backtrace;
 use crate::utils::TriState::{DontCare, False, True};
 use crate::win_helpers::{enum_proc_info, EnumerationState};
 use bitvec::vec::BitVec;
 use std::collections::HashMap;
-use std::ops::Deref;
-use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID};
-use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
 
@@ -72,9 +68,44 @@ impl From<bool> for TriState {
 	fn from(v: bool) -> TriState { if v { True } else { False } }
 }
 
+pub fn string_to_bytes_radix(s: &str, radix: Option<u32>) -> Result<Vec<u8>, ()> {
+	let radix = radix.unwrap_or(10);
+	if radix < 2 || radix > 36 { return Err(()) }
+	let stripped = s.trim().trim_start_matches('0');
+
+	if stripped.is_empty() {
+		return Ok(vec![0]);
+	}
+
+	let mut bytes = Vec::new();
+
+	for c in stripped.chars() {
+		let mut carry = c.to_digit(radix).ok_or(())?;
+
+		for byte in bytes.iter_mut() {
+			let current = (*byte as u32) * radix + carry;
+			*byte = (current & 0xFF) as u8;
+			carry = current >> 8;
+		}
+
+		while carry > 0 {
+			bytes.push((carry & 0xFF) as u8);
+			carry >>= 8;
+		}
+	}
+
+	Ok(bytes.into_iter().rev().collect())
+}
+
+pub fn string_to_bytes_dec(s: &str) -> Result<Vec<u8>, ()> { string_to_bytes_radix(s, None) }
+pub fn string_to_bytes_hex(s: &str) -> Result<Vec<u8>, ()> { string_to_bytes_radix(s, Some(16)) }
+#[cfg(not(debug_assertions))]
 macro_rules! get {
 	($e1:expr, $e2:expr) => { unsafe { $e1.get_unchecked($e2) } };
 }
 
+#[cfg(debug_assertions)]
+macro_rules! get {
+    ($e1:expr, $e2:expr) => { &$e1[$e2] }
+}
 pub(crate) use get;
-use crate::errors::ElevationError;

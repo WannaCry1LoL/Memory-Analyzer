@@ -82,7 +82,7 @@ pub struct ScanDiskManager {
 }
 
 impl ScanDiskManager {
-	fn new(handle: HANDLE, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
+	pub fn new(handle: HANDLE, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
 		let mut dir = std::env::temp_dir();
 		dir.push("MemScanner");
 		match fs::create_dir(&dir) {
@@ -154,3 +154,5 @@ impl ScanDiskManager {
 		self.scan_file.write_all(bytes)
 	}
 }
+
+unsafe impl Send for ScanDiskManager {}

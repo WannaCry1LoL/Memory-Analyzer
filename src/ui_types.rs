@@ -41,7 +41,7 @@ pub enum FieldTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueType {
+pub enum UiValueType {
 	Byte,
 	Word,
 	Dword,
@@ -51,38 +51,38 @@ pub enum ValueType {
 	ArrayOfByte,
 }
 
-impl ValueType {
-	pub const ALL: [ValueType; 7] = [
-		ValueType::Byte,
-		ValueType::Word,
-		ValueType::Dword,
-		ValueType::Qword,
-		ValueType::Float,
-		ValueType::Double,
-		ValueType::ArrayOfByte,
+impl UiValueType {
+	pub const ALL: [UiValueType; 7] = [
+		UiValueType::Byte,
+		UiValueType::Word,
+		UiValueType::Dword,
+		UiValueType::Qword,
+		UiValueType::Float,
+		UiValueType::Double,
+		UiValueType::ArrayOfByte,
 	];
 
 	pub fn label(self) -> &'static str {
 		match self {
-			ValueType::Byte => "Byte",
-			ValueType::Word => "2 Bytes",
-			ValueType::Dword => "4 Bytes",
-			ValueType::Qword => "8 Bytes",
-			ValueType::Float => "Float",
-			ValueType::Double => "Double",
-			ValueType::ArrayOfByte => "Array of byte",
+			UiValueType::Byte => "Byte",
+			UiValueType::Word => "2 Bytes",
+			UiValueType::Dword => "4 Bytes",
+			UiValueType::Qword => "8 Bytes",
+			UiValueType::Float => "Float",
+			UiValueType::Double => "Double",
+			UiValueType::ArrayOfByte => "Array of byte",
 		}
 	}
 
 	pub fn is_numeric(self) -> bool {
-		self != ValueType::ArrayOfByte
+		self != UiValueType::ArrayOfByte
 	}
 
 	pub fn is_float(self) -> bool {
-		matches!(self, ValueType::Float | ValueType::Double)
+		matches!(self, UiValueType::Float | UiValueType::Double)
 	}
 
-	pub fn cycle(self, dir: i32) -> ValueType {
+	pub fn cycle(self, dir: i32) -> UiValueType {
 		let all = Self::ALL;
 		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
 		let len = all.len() as i32;
@@ -145,7 +145,7 @@ pub struct MatchEntry {
 pub struct SavedEntry {
 	pub description: String,
 	pub address: usize,
-	pub value_type: ValueType,
+	pub value_type: UiValueType,
 	pub value: String,
 	pub locked: bool,
 }

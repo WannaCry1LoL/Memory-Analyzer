@@ -1,14 +1,13 @@
 use crate::errors::{MemoryReadError, ProcessError, ProcessOperationError};
 use crate::externs::{IntoResult, NtResumeProcess, NtSuspendProcess};
 use crate::mem2disk::BlockDescriptor;
-use crate::win_helpers::{get_process_image_path, read_bytes};
+use crate::win_helpers::{get_process_image_path, read_bytes, SendHandle};
 use std::convert::TryFrom;
 use sysinfo::Pid;
 use windows::core::BOOL;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, E_ACCESSDENIED, HANDLE, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, DuplicateHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, E_ACCESSDENIED, HANDLE, HWND, LPARAM, RECT};
 use windows::Win32::System::Threading::{GetProcessId, OpenProcess, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW};
-
 struct WindowSearchState { found_windows: Vec<HWND>, }
 
 fn is_valid_target_window(hwnd: HWND) -> bool { unsafe {
@@ -55,10 +54,21 @@ impl Drop for SuspendGuard<'_> {
 type ErrorType = ProcessError;
 
 pub struct Process {
-	handle: HANDLE,
+	handle: SendHandle,
 	pid: Pid,
 	image_name: String,
 	image_path: String
+}
+
+impl Clone for Process {
+	fn clone(&self) -> Self {
+		Self {
+			handle: Default::default(),
+			pid: self.pid,
+			image_name: self.image_name.clone(),
+			image_path: self.image_path.clone(),
+		}
+	}
 }
 
 impl Process {
@@ -83,7 +93,7 @@ impl Process {
 			})?;
 
 			let path = get_process_image_path(handle).unwrap_or_default();
-			let image_name = path.rsplit_once('/').map(|(_, p)| p).unwrap_or_default().to_string();
+			let image_name = path.rsplit_once('\\').map(|(_, p)| p).unwrap_or_default().to_string();
 
 			CloseHandle(handle).ok();
 
@@ -145,14 +155,14 @@ impl Process {
 					_ => ErrorType::Unknown
 				})?;
 
-				self.handle = res2;
+				self.handle = res2.into();
 			}
 		}
 		Ok(())
 	}
 
 	pub fn get_handle(&self) -> HANDLE {
-		self.handle
+		*self.handle
 	}
 
 	pub fn get_pid(&self) -> Pid {
@@ -163,14 +173,15 @@ impl Process {
 	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
 		debug_assert!(!self.handle.is_invalid());
 		let mut buffer = vec![0u8; block_descriptor.size];
-		let res = read_bytes(
-			self.handle,
+
+		let read_count = read_bytes(
+			*self.handle,
 			block_descriptor.virtual_address as _,
 			buffer.as_mut_ptr(),
 			block_descriptor.size
-		);
+		)?;
 
-		res?;
+		buffer.truncate(read_count);
 		Ok(buffer)
 	}
 
@@ -178,14 +189,14 @@ impl Process {
 		assert!(!self.handle.is_invalid());
 
 		if self.pid.as_u32() == std::process::id() { return Err(ProcessOperationError::CannotSuspendSelf) }
-		let res = unsafe { NtSuspendProcess(self.handle) };
+		let res = unsafe { NtSuspendProcess(*self.handle) };
 		res.into_result().map_err(ProcessOperationError::SuspendFailed)
 	}
 
 	pub fn resume(&self) -> Result<(), ProcessOperationError> {
 		assert!(!self.handle.is_invalid());
 
-		let res = unsafe { NtResumeProcess(self.handle) };
+		let res = unsafe { NtResumeProcess(*self.handle) };
 		res.into_result().map_err(ProcessOperationError::ResumeFailed)
 	}
 

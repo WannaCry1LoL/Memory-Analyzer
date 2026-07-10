@@ -11,6 +11,8 @@ pub enum IntCondition {
 	Eq(i128),
 	NotEq(i128),
 	Range(i128, i128),
+	GreaterThan(i128),
+	LessThan(i128),
 	FuzzyEq(i128, i128),
 }
 
@@ -19,6 +21,8 @@ pub enum FloatCondition {
 	Eq(f64),
 	NotEq(f64),
 	Range(f64, f64),
+	GreaterThan(f64),
+	LessThan(f64),
 	FuzzyEq(f64, f64),
 }
 
@@ -53,6 +57,8 @@ impl<T: Scannable + FromU128> From<IntCondition> for ScanCondition<T> {
 			IntCondition::Range(lo, hi) => ScanCondition::from_logical_range(lo, hi),
 			IntCondition::Eq(n) => ScanCondition::<T>::Eq(to_bit_pattern(n)),
 			IntCondition::NotEq(n) => ScanCondition::<T>::NotEq(to_bit_pattern(n)),
+			IntCondition::GreaterThan(n) => ScanCondition::<T>::from_greater_than(to_bit_pattern(n)),
+			IntCondition::LessThan(n) => ScanCondition::<T>::from_less_than(to_bit_pattern(n)),
 			IntCondition::FuzzyEq(n, eps) => ScanCondition::<T>::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps)),
 		}
 	}
@@ -64,6 +70,8 @@ impl From<FloatCondition> for ScanCondition<f32> {
 			FloatCondition::Eq(n) => ScanCondition::Eq(n as f32),
 			FloatCondition::NotEq(n) => ScanCondition::NotEq(n as f32),
 			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo as f32, hi as f32),
+			FloatCondition::LessThan(n) => ScanCondition::<f32>::from_less_than(n as f32),
+			FloatCondition::GreaterThan(n) => ScanCondition::<f32>::from_greater_than(n as f32),
 			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n as f32, eps as f32),
 		}
 	}
@@ -75,6 +83,8 @@ impl From<FloatCondition> for ScanCondition<f64> {
 			FloatCondition::Eq(n) => ScanCondition::Eq(n),
 			FloatCondition::NotEq(n) => ScanCondition::NotEq(n),
 			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo, hi),
+			FloatCondition::LessThan(n) => ScanCondition::from_less_than(n),
+			FloatCondition::GreaterThan(n) => ScanCondition::from_greater_than(n),
 			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n, eps),
 		}
 	}
@@ -143,7 +153,7 @@ impl Default for ScanOptions {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryScannerOptions {
 	pub scan_options: ScanOptions,
 	pub dump_options: DumpFlags
@@ -165,6 +175,22 @@ pub struct MemoryScanner {
 // TODO: narrow scans
 
 impl MemoryScanner {
+	pub fn new(mut process: Process, options: MemoryScannerOptions) -> Result<Self, std::io::Error> {
+		process
+			.init_handle()
+			.map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{:?}", e)))?;
+		let handle = process.get_handle();
+
+		let file_manager = ScanDiskManager::new(handle, options.dump_options)?;
+
+		Ok(Self {
+			file_manager,
+			process,
+			state: MatchingState::new(1, 1),
+			options,
+		})
+	}
+
 	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
 		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?; // maybe move this somewhere else
 		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
@@ -177,7 +203,9 @@ impl MemoryScanner {
 		//self.file_manager.write_header(&blocks).map_err(MemoryScanError::MemoryDumpFailed)?;
 
 		for desc in &blocks {
-			let mem = self.process.get_chunk(desc).map_err(MemoryScanError::MemoryReadFailed)?;
+			let Ok(mem) = self.process.get_chunk(desc) else {
+				continue
+			};
 			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
 
 			let mask = request.run(&mem, alignment);
@@ -227,6 +255,11 @@ impl MemoryScanner {
 
 			for (k, i) in block.match_mask.iter_ones().enumerate() {
 				let offset = i * alignment;
+
+				if offset + elem_size > mem.len() {
+					break;
+				}
+				
 				let bytes = get!(mem, offset .. offset + elem_size) ;
 
 				if request.test_bytes(bytes) {

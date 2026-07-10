@@ -10,6 +10,34 @@ use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
 
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(transparent)]
+pub struct SendHandle(pub HANDLE);
+
+impl SendHandle {
+	pub fn is_invalid(&self) -> bool {
+		self.0.is_invalid()
+	}
+}
+
+impl Deref for SendHandle {
+	type Target = HANDLE;
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl From<HANDLE> for SendHandle {
+	fn from(h: HANDLE) -> Self { SendHandle(h) }
+}
+
+impl From<SendHandle> for HANDLE {
+	fn from(h: SendHandle) -> Self { h.0 }
+}
+
+unsafe impl Send for SendHandle {}
+unsafe impl Sync for SendHandle {}
+
 #[derive(PartialEq)]
 pub enum EnumerationState<T> {
 	Continue,
@@ -25,7 +53,7 @@ pub fn get_sys_info() -> SYSTEM_INFO {
 	}
 }
 
-pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usize) -> Result<(), MemoryReadError> {
+pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usize) -> Result<usize, MemoryReadError> {
 	let mut read_bytes: usize = 0;
 	let status = unsafe { NtReadVirtualMemory(
 		handle,
@@ -35,10 +63,11 @@ pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usiz
 		&mut read_bytes,
 	) };
 
-	if read_bytes != len {
-		return Err(MemoryReadError::NotEnoughBytesRead)
+	if read_bytes == 0 {
+		return status.into_result().map_err(MemoryReadError::Other).map(|_| 0);
 	}
-	status.into_result().map_err(MemoryReadError::Other)
+
+	Ok(read_bytes)
 }
 
 pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: usize) -> Result<(), MemoryWriteError> {
@@ -61,7 +90,10 @@ pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: u
 pub fn read_generic<T: Sized>(handle: HANDLE, address: *const u8) -> Result<T, MemoryReadError> {
 	let mut mem = MaybeUninit::<T>::uninit();
 	let res = read_bytes(handle, address, mem.as_mut_ptr() as _, size_of::<T>());
-	res?;
+	let read = res?;
+	if read != size_of::<T>() {
+		return Err(MemoryReadError::NotEnoughBytesRead);
+	}
 	Ok(unsafe { mem.assume_init() })
 }
 
