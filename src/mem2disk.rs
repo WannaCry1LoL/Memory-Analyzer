@@ -3,8 +3,7 @@ use crate::utils::TriState::{DontCare, False, True};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::{fs, slice};
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_PRIVATE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_PROTECTION_FLAGS, PAGE_READWRITE, PAGE_WRITECOPY};
+use crate::externs::*;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DumpFlags {
@@ -16,18 +15,10 @@ pub struct DumpFlags {
 }
 
 impl DumpFlags {
-	const WRITABLE_FLAGS: u32 = PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0;
-	const EXECUTABLE_FLAGS: u32 = PAGE_EXECUTE.0 | PAGE_EXECUTE_READ.0 | PAGE_EXECUTE_READWRITE.0 | PAGE_EXECUTE_WRITECOPY.0;
-	const COW_FLAGS: u32 = PAGE_WRITECOPY.0 | PAGE_EXECUTE_WRITECOPY.0;
-
-	fn is_writable(flags: PAGE_PROTECTION_FLAGS) -> bool { flags.0 & Self::WRITABLE_FLAGS != 0 }
-	fn is_executable(flags: PAGE_PROTECTION_FLAGS) -> bool { flags.0 & Self::EXECUTABLE_FLAGS != 0 }
-	fn is_cow(flags: PAGE_PROTECTION_FLAGS) -> bool { flags.0 & Self::COW_FLAGS != 0 }
-
-	pub fn page_flags_match(&self, flags: PAGE_PROTECTION_FLAGS) -> bool {
-		self.writable.matches(Self::is_writable(flags))
-			&& self.executable.matches(Self::is_executable(flags))
-			&& self.copy_on_write.matches(Self::is_cow(flags))
+	pub fn page_flags_match(&self, flags: PageProtectionFlags) -> bool {
+		self.writable.matches(flags.is_writable())
+			&& self.executable.matches(flags.is_executable())
+			&& self.copy_on_write.matches(flags.is_cow())
 	}
 
 	pub fn new(writable: TriState, executable: TriState, copy_on_write: TriState, start_address: usize, end_address: usize) -> Self {
@@ -75,14 +66,14 @@ impl BlockDescriptor {
 }
 
 pub struct ScanDiskManager {
-	handle: HANDLE,
+	handle: Handle,
 	initial_scan_file: File,
 	scan_file: File,
 	flags: DumpFlags
 }
 
 impl ScanDiskManager {
-	pub fn new(handle: HANDLE, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
+	pub fn new(handle: Handle, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
 		let mut dir = std::env::temp_dir();
 		dir.push("MemScanner");
 		match fs::create_dir(&dir) {
@@ -107,20 +98,20 @@ impl ScanDiskManager {
 		let max_addr = self.flags.end_address as _;
 		let mut blocks = Vec::new();
 		let mut base_addr = self.flags.start_address as _;
-		let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
 
 		loop {
-			let written = unsafe {
-				VirtualQueryEx(self.handle, Some(base_addr), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+			let Ok((info, written)) = virtual_query_ex(self.handle, base_addr) else {
+				break
 			};
+
 			if written == 0 || base_addr as usize >= max_addr { break; }
 
-			if self.flags.page_flags_match(info.Protect)
-				&& info.State == MEM_COMMIT
-				&& matches!(info.Type, MEM_PRIVATE | MEM_IMAGE) {
-				blocks.push(BlockDescriptor::new(base_addr as usize, info.RegionSize));
+			if self.flags.page_flags_match(info.protect)
+				&& info.state == MEM_COMMIT
+				&& matches!(info.typ, MEM_PRIVATE | MEM_IMAGE) {
+				blocks.push(BlockDescriptor::new(base_addr as usize, info.region_size));
 			}
-			base_addr = unsafe { base_addr.byte_add(info.RegionSize) };
+			base_addr = unsafe { base_addr.byte_add(info.region_size) };
 		}
 
 		let mut curr_offset = size_of::<FileHeader>() + blocks.len() * size_of::<BlockDescriptor>();

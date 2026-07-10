@@ -3,7 +3,6 @@
 extern crate core;
 
 mod utils;
-mod externs;
 mod matches;
 mod win_helpers;
 mod process;
@@ -14,7 +13,7 @@ mod mem2disk;
 mod simd_types;
 mod ui;
 mod ui_types;
-mod bindings_test;
+mod externs;
 
 use std::io;
 use std::io::ErrorKind;

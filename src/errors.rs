@@ -1,5 +1,4 @@
-use windows::Win32::Foundation::{NTSTATUS, WIN32_ERROR};
-
+use crate::externs::NtStatus;
 #[derive(Debug)]
 pub enum ProcessError {
 	/// The handle is invalid
@@ -21,8 +20,8 @@ pub enum ProcessError {
 pub enum ProcessOperationError {
 	/// Suspend failed because the own process may not be suspended
 	CannotSuspendSelf,
-	SuspendFailed(NTSTATUS),
-	ResumeFailed(NTSTATUS)
+	SuspendFailed(NtStatus),
+	ResumeFailed(NtStatus)
 }
 
 #[derive(Debug)]
@@ -45,21 +44,21 @@ pub enum MemoryReadError {
 	/// The memory is not valid for the selected settings (ie PAGE_EXECUTE_READWRITE with execute set to False)
 	UnsuitableMemory,
 
-	Other(NTSTATUS),
+	Other(NtStatus),
 }
 
 #[derive(Debug)]
 pub enum MemoryWriteError {
 	/// NtWriteVirtualMemory returned less bytes written than requested
 	NotEnoughBytesWritten,
-	Other(NTSTATUS),
+	Other(NtStatus),
 }
 
 #[derive(Debug)]
 pub enum ProcessImagePathError {
 	/// Windows returned invalid UTF 16
 	InvalidUtf16ImagePath,
-	Unknown(WIN32_ERROR)
+	Unknown(NtStatus),
 }
 
 #[derive(Debug)]
@@ -68,16 +67,7 @@ pub enum ElevationError {
 	PrivilegeLookupFailed,
 	/// Windows reports that the privilege was not assigned.
 	PrivilegeNotAssigned,
+	/// NtAdjustPrivilegesToken returned a non-success ntstatus
+	PrivilegeAdjustmentFailed,
 	Unknown
-}
-
-impl From<windows::core::Error> for ElevationError {
-	fn from(err: windows::core::Error) -> Self {
-		let win32_err = WIN32_ERROR::from_error(&err);
-
-		match win32_err {
-			Some(_) => ElevationError::PrivilegeLookupFailed,
-			None => ElevationError::Unknown
-		}
-	}
 }

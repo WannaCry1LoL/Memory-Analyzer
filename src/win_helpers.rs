@@ -1,42 +1,11 @@
+use crate::externs::*;
 use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
 use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessImagePathError};
-use crate::externs::*;
 use std::mem::MaybeUninit;
-use std::{mem, ptr, ptr::null_mut};
-use std::ops::Deref;
-use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID, STATUS_INFO_LENGTH_MISMATCH};
-use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
-use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
-
-#[derive(Debug, Default, Clone, Copy)]
-#[repr(transparent)]
-pub struct SendHandle(pub HANDLE);
-
-impl SendHandle {
-	pub fn is_invalid(&self) -> bool {
-		self.0.is_invalid()
-	}
-}
-
-impl Deref for SendHandle {
-	type Target = HANDLE;
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
-}
-
-impl From<HANDLE> for SendHandle {
-	fn from(h: HANDLE) -> Self { SendHandle(h) }
-}
-
-impl From<SendHandle> for HANDLE {
-	fn from(h: SendHandle) -> Self { h.0 }
-}
-
-unsafe impl Send for SendHandle {}
-unsafe impl Sync for SendHandle {}
+use std::os::windows::io::OwnedHandle;
+use std::os::windows::prelude::FromRawHandle;
+use std::ptr::null;
+use std::{ptr, ptr::null_mut};
 
 #[derive(PartialEq)]
 pub enum EnumerationState<T> {
@@ -45,15 +14,7 @@ pub enum EnumerationState<T> {
 	Return(T)
 }
 
-pub fn get_sys_info() -> SYSTEM_INFO {
-	unsafe {
-		let mut sys_info: SYSTEM_INFO = mem::zeroed();
-		GetSystemInfo(&mut sys_info);
-		sys_info
-	}
-}
-
-pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usize) -> Result<usize, MemoryReadError> {
+pub fn read_bytes(handle: Handle, address: *const u8, buffer: *mut u8, len: usize) -> Result<usize, MemoryReadError> {
 	let mut read_bytes: usize = 0;
 	let status = unsafe { NtReadVirtualMemory(
 		handle,
@@ -70,7 +31,7 @@ pub fn read_bytes(handle: HANDLE, address: *const u8, buffer: *mut u8, len: usiz
 	Ok(read_bytes)
 }
 
-pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: usize) -> Result<(), MemoryWriteError> {
+pub fn write_bytes(handle: Handle, address: *const u8, buffer: *const u8, len: usize) -> Result<(), MemoryWriteError> {
 	let mut written_bytes: usize = 0;
 	let status = unsafe { NtWriteVirtualMemory(
 		handle,
@@ -87,7 +48,7 @@ pub fn write_bytes(handle: HANDLE, address: *const u8, buffer: *const u8, len: u
 	status.into_result().map_err(MemoryWriteError::Other)
 }
 
-pub fn read_generic<T: Sized>(handle: HANDLE, address: *const u8) -> Result<T, MemoryReadError> {
+pub fn read_generic<T: Sized>(handle: Handle, address: *const u8) -> Result<T, MemoryReadError> {
 	let mut mem = MaybeUninit::<T>::uninit();
 	let res = read_bytes(handle, address, mem.as_mut_ptr() as _, size_of::<T>());
 	let read = res?;
@@ -97,41 +58,37 @@ pub fn read_generic<T: Sized>(handle: HANDLE, address: *const u8) -> Result<T, M
 	Ok(unsafe { mem.assume_init() })
 }
 
-pub fn write_generic<T: Sized>(handle: HANDLE, address: *const u8, value: T) -> Result<(), MemoryWriteError> {
+pub fn write_generic<T: Sized>(handle: Handle, address: *const u8, value: T) -> Result<(), MemoryWriteError> {
 	let ptr = &raw const value;
 	let res = write_bytes(handle, address, ptr as _, size_of::<T>());
 	res?;
 	Ok(())
 }
 
-pub fn get_process_image_path(handle: HANDLE) -> Result<String, ProcessImagePathError> {
+pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePathError> {
 	let mut buffer = vec![0u16; 1024];
-	let mut size = buffer.len() as u32;
-
-	unsafe {
-		QueryFullProcessImageNameW(
+	let size = unsafe {
+		query_full_process_image_name(
 			handle,
-			PROCESS_NAME_FORMAT(0),
-			windows::core::PWSTR(buffer.as_mut_ptr()),
-			&mut size,
-		)
-			.map_err(|_| ProcessImagePathError::Unknown(GetLastError()))?;
-	}
+			&mut buffer[..]
+		).map_err(ProcessImagePathError::Unknown)?
+	};
+
 	String::from_utf16(&buffer[0..size as usize])
 		.map_err(|_| InvalidUtf16ImagePath)
 }
 
-pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATION) -> EnumerationState<T>) -> Option<T> {
+pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation) -> EnumerationState<T>) -> Option<T> {
 	unsafe {
 		let mut bytes: u32 = 0;
 		let mut bytes_written: u32 = 0;
 
 		if NtQuerySystemInformation(
-			SystemBasicProcessInformation,
+			SystemInformationClass::SYSTEM_BASIC_PROCESS_INFORMATION,
 			null_mut(),
 			0,
 			&mut bytes,
-		) != STATUS_INFO_LENGTH_MISMATCH {
+		) != NtStatus::STATUS_INFO_LENGTH_MISMATCH {
 			return None;
 		}
 
@@ -139,15 +96,15 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATI
 		let mut base_ptr = sys_info.as_ptr();
 
 		if NtQuerySystemInformation(
-			SystemBasicProcessInformation,
+			SystemInformationClass::SYSTEM_BASIC_PROCESS_INFORMATION,
 			sys_info.as_mut_ptr() as _,
 			bytes,
 			&mut bytes_written
 		).is_ok() {
-			let mut current_sys_info: SYSTEM_BASICPROCESS_INFORMATION;
+			let mut current_sys_info: SystemBasicProcessInformation;
 
 			loop {
-				let ptr = base_ptr as *const SYSTEM_BASICPROCESS_INFORMATION;
+				let ptr = base_ptr as *const SystemBasicProcessInformation;
 				current_sys_info = ptr::read_unaligned(ptr);
 
 				match callback(&current_sys_info) {
@@ -166,52 +123,38 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SYSTEM_BASICPROCESS_INFORMATI
 	None
 }
 
-
-pub struct HandleGuard<'a> {
-	handle: &'a mut HANDLE,
-}
-
-impl Drop for HandleGuard<'_> {
-	fn drop(&mut self) { let _ = unsafe { CloseHandle(*self.handle) }; }
-}
-
-impl Deref for HandleGuard<'_> {
-	type Target = HANDLE;
-	fn deref(&self) -> &HANDLE { self.handle }
-}
-
 pub fn enable_debug_privilege() -> Result<(), ElevationError> {
 	unsafe {
-		let mut h_token = HANDLE::default();
+		let token = open_process_token(
+			Handle::CURRENT_PROCESS,
+			TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+		).map_err(|_| ElevationError::Unknown)?;
 
-		OpenProcessToken(
-			GetCurrentProcess(),
-			TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-			&mut h_token
-		)?;
+		let guard = OwnedHandle::from_raw_handle(token.0);
 
-		let handle = HandleGuard { handle: &mut h_token };
+		let mut luid = Luid::default();
+		let priv_name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
 
-		let mut luid = LUID::default();
+		if LookupPrivilegeValueW(null(), priv_name.as_ptr(), &mut luid) == 0 {
+			return Err(ElevationError::PrivilegeLookupFailed)
+		};
 
-		LookupPrivilegeValueW(None, w!("SeDebugPrivilege"), &mut luid)?;
+		let mut tp = TokenPrivileges::default();
+		tp.privilege_count = 1;
+		tp.privileges[0].luid = luid;
+		tp.privileges[0].attributes = SE_PRIVILEGE_ENABLED;
 
-		let mut tp = TOKEN_PRIVILEGES::default();
-		tp.PrivilegeCount = 1;
-		tp.Privileges[0].Luid = luid;
-		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-		AdjustTokenPrivileges(
-			*handle,
+		adjust_token_privileges(
+			guard.into(),
 			false,
 			Some(&tp),
-			size_of::<TOKEN_PRIVILEGES>() as _,
+			size_of::<TokenPrivileges>() as _,
 			None,
-			None,
-		)?;
+			None
+		).map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
 
-		match GetLastError() {
-			ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
+		match RtlGetLastWin32Error() {
+			Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
 			_ => Ok(())
 		}
 	}

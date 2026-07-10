@@ -1,10 +1,38 @@
-use std::backtrace::Backtrace;
 use crate::utils::TriState::{DontCare, False, True};
 use crate::win_helpers::{enum_proc_info, EnumerationState};
 use bitvec::vec::BitVec;
 use std::collections::HashMap;
-
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Default)]
+pub struct Pid(pub u32);
+
+unsafe impl Send for Pid {}
+unsafe impl Sync for Pid {}
+
+macro_rules! impl_fmt_forward {
+    ($ty:ty => $($trait:path),+ $(,)?) => {
+        $(
+            impl $trait for $ty {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+            }
+        )+
+    };
+}
+
+impl_fmt_forward!(Pid => std::fmt::Display, std::fmt::UpperHex);
+impl From<u32> for Pid {
+	fn from(pid: u32) -> Self {
+		Self(pid)
+	}
+}
+
+impl From<Pid> for u32 {
+	fn from(pid: Pid) -> Self {
+		pid.0
+	}
+}
 
 pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
 	let mut ret: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -22,9 +50,9 @@ pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
 }
 
 pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
-	enum_proc_info(|info| unsafe {
-		if !info.image_name.Buffer.is_null()
-			&& let Ok(res) = info.image_name.Buffer.to_string()
+	enum_proc_info(|info| {
+		if !info.image_name.buffer.is_null()
+			&& let res = info.image_name.to_string()
 			&& res == name
 		{ EnumerationState::Return(info.unique_process_id) } 
 		else { EnumerationState::Continue }
