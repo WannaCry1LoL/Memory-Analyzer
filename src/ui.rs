@@ -16,7 +16,7 @@ use ratatui::{
 use std::sync::{mpsc};
 use std::thread;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ACCENT: Color = Color::Yellow;
 const EDIT: Color = Color::Green;
@@ -28,6 +28,7 @@ pub enum ScanEvent {
 		scanner: MemoryScanner,
 		result: Result<(), String>,
 		was_narrow: bool,
+		elapsed: Duration,
 	},
 }
 
@@ -167,6 +168,7 @@ pub struct App {
 	pub visible_start_idx: usize,
 	pub visible_end_idx: usize,
 	pub scan_just_finished: bool,
+	pub last_value_refresh: Instant,
 }
 
 impl App {
@@ -218,6 +220,7 @@ impl App {
 			visible_start_idx: 0,
 			visible_end_idx: 0,
 			scan_just_finished: false,
+			last_value_refresh: Instant::now(),
 		}
 	}
 
@@ -620,7 +623,7 @@ impl App {
 
 	fn reset_scan_state(&mut self) {
 		if let Some(scanner) = self.scanner.as_mut() {
-			scanner.state = MatchingState::new(1, 1);
+			scanner.state = MatchingState::new(1, 1, true);
 		}
 		self.has_first_scan = false;
 		self.scan_count = 0;
@@ -650,9 +653,11 @@ impl App {
 			self.scan_rx = Some(rx);
 
 			thread::spawn(move || {
+				let started = Instant::now();
 				let res = if narrow { scanner.narrow(req) } else { scanner.scan(req) };
+				let elapsed = started.elapsed();
 				let result = res.map_err(|e| format!("{:?}", e));
-				let _ = tx.send(ScanEvent::Finished { scanner, result, was_narrow: narrow });
+				let _ = tx.send(ScanEvent::Finished { scanner, result, was_narrow: narrow, elapsed });
 			});
 		}
 	}
@@ -661,7 +666,7 @@ impl App {
 		if let Some(rx) = &self.scan_rx {
 			if let Ok(event) = rx.try_recv() {
 				match event {
-					ScanEvent::Finished { scanner, result, was_narrow } => {
+					ScanEvent::Finished { scanner, result, was_narrow, elapsed } => {
 						self.is_scanning = false;
 						if self.screen == Screen::Scanner {
 							self.scanner = Some(scanner);
@@ -671,7 +676,7 @@ impl App {
 									self.scan_count = if was_narrow { self.scan_count + 1 } else { 1 };
 									self.results_selected = 0;
 									let total = self.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
-									self.status = format!("Found {} matches.", total);
+									self.status = format!("Found {} matches in {:.2?}.", total, elapsed);
 									self.focus = Focus::ResultsList;
 									self.scan_just_finished = true;
 								}
@@ -738,7 +743,7 @@ impl App {
 		}
 	}
 
-	pub fn update_visible_matches_cache(&mut self, visible_rows: usize) {
+	pub fn update_visible_matches(&mut self, visible_rows: usize) {
 		let total_matches = self.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
 
 		let mut start_idx = 0;
@@ -787,6 +792,16 @@ impl App {
 			let _ = tx.send(WorkerCommand::ReadBatch { addresses });
 		}
 	}
+
+	pub fn tick(&mut self) {
+		if self.screen == Screen::Scanner && self.scanner.is_some() {
+			if self.last_value_refresh.elapsed() >= Duration::from_millis(500) {
+				self.refresh_visible_matches();
+				self.refresh_saved_values();
+				self.last_value_refresh = Instant::now();
+			}
+		}
+	}
 }
 
 pub fn format_bytes(bytes: &[u8], value_type: UiValueType) -> String {
@@ -830,6 +845,7 @@ fn saved_entry_size(entry: &SavedEntry) -> usize {
 /* Drawing */
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+	app.tick();
 	match app.screen {
 		Screen::ProcessSelect => draw_process_select(f, app),
 		Screen::Scanner => draw_scanner(f, app),
@@ -935,7 +951,7 @@ fn draw_results(f: &mut Frame, app: &mut App, area: Rect) {
 	let total_matches = app.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
 	let visible_rows = area.height.saturating_sub(3) as usize;
 
-	app.update_visible_matches_cache(visible_rows);
+	app.update_visible_matches(visible_rows);
 
 	let mut rows: Vec<Row> = Vec::with_capacity(app.visible_matches.len());
 	for entry in &app.visible_matches {

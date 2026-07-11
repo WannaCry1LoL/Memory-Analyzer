@@ -169,11 +169,9 @@ impl Process {
 			.map(|_| buffer)
 	}
 
-	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut Vec<u8>) -> Result<usize, MemoryReadError> {
+	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut [u8]) -> Result<usize, MemoryReadError> {
 		debug_assert!(!self.handle.is_invalid());
-		if buffer.len() < block_descriptor.size {
-			buffer.reserve(block_descriptor.size - buffer.len());
-		}
+		debug_assert!(buffer.len() >= block_descriptor.size);
 
 		let read_count = read_bytes(
 			self.handle,
@@ -182,7 +180,7 @@ impl Process {
 			block_descriptor.size
 		)?;
 
-		unsafe { buffer.set_len(read_count) };
+		//unsafe { buffer.set_len(read_count) };
 		Ok(read_count)
 	}
 

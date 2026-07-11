@@ -188,7 +188,7 @@ impl MemoryScanner {
 		Ok(Self {
 			file_manager,
 			process,
-			state: MatchingState::new(1, 1),
+			state: MatchingState::new(1, 1, true),
 			options,
 		})
 	}
@@ -200,15 +200,32 @@ impl MemoryScanner {
 		let alignment = self.options.resolve_alignment(&request);
 		let element_size = request.element_size();
 		let blocks = self.file_manager.enumerate_blocks();
-		let mut new_state = MatchingState::new(alignment, element_size);
+		let mut new_state = MatchingState::new(alignment, element_size, true);
 
 		let process = &self.process;
+		let mut capacity = 0;
+		let mut block_offsets = Vec::with_capacity(blocks.len());
+		for block in &blocks {
+			block_offsets.push(capacity);
+			capacity += block.size;
+		}
+
+		let mut main_buffer = Vec::<u8>::with_capacity(capacity);
+		unsafe { main_buffer.set_len(capacity); }
+		let mut remaining_buf = main_buffer.as_mut_slice(); // dont care since its u8
+		let mut chunk_slices = Vec::with_capacity(blocks.len());
+
+		for block in &blocks {
+			let (left, right) = remaining_buf.split_at_mut(block.size);
+			chunk_slices.push(left);
+			remaining_buf = right;
+		}
 
 		let results: Vec<(usize, MatchMask, Vec<u8>)> = blocks
 			.par_iter()
-			.filter_map(|desc| {
-				let mut buf = vec![0u8; desc.size];
-				let read = process.get_chunk_into(desc, &mut buf).ok()?;
+			.zip(chunk_slices)
+			.filter_map(|(desc, buf)| {
+				let read = process.get_chunk_into(desc, buf).ok()?;
 				let mem = &buf[..read];
 
 				let mask = request.run(mem, alignment);
@@ -242,52 +259,81 @@ impl MemoryScanner {
 
 		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
 
-		let mut new_state = MatchingState::new(alignment, elem_size);
+		let mut new_state = MatchingState::new(alignment, elem_size, false);
 
-		let cap = self.state.blocks.iter().map(|x| (x.match_mask.len() - 1) * alignment + elem_size).max();
-		let allocated = cap.unwrap_or_default();
-		let mut vec = Vec::with_capacity(allocated);
+		let process = &self.process;
+		let state = &self.state;
 
-		for block in &self.state.blocks {
+		let initial = if state.initial_scan { &state.data } else { &state.initial };
+
+		let mut capacity = 0;
+		for block in &state.blocks {
 			let mask_len = block.match_mask.len();
-			if mask_len == 0 { continue; }
-
-			let read_size = (mask_len - 1) * alignment + elem_size;
-			let desc = BlockDescriptor::new(block.base_address, read_size);
-
-			let Ok(read) = self.process.get_chunk_into(&desc, &mut vec) else {
-				continue
-			};
-			
-			let mem = &vec[..read];
-
-			let mut new_mask = MatchMask::repeat(false, mask_len);
-
-			let old_count = block.match_mask.count_ones();
-			let mut current_values = Vec::with_capacity(old_count * elem_size);
-			let mut initial_values = Vec::with_capacity(old_count * elem_size);
-
-			for (k, i) in block.match_mask.iter_ones().enumerate() {
-				let offset = i * alignment;
-
-				if offset + elem_size > mem.len() {
-					break;
-				}
-				
-				let bytes = get!(mem, offset .. offset + elem_size) ;
-
-				if request.test_bytes(bytes) {
-					new_mask.set(i, true);
-					current_values.extend_from_slice(bytes);
-
-					let old_off = block.data_offset + k * elem_size;
-					initial_values.extend_from_slice(get!(&self.state.initial, old_off .. old_off + elem_size));
-				}
+			if mask_len > 0 {
+				capacity += (mask_len - 1) * alignment + elem_size;
 			}
+		}
 
-			if new_mask.count_ones() > 0 {
-				new_state.push_narrowed_block(block.base_address, new_mask, &initial_values, &current_values);
+		let mut main_buffer = Vec::<u8>::with_capacity(capacity);
+		unsafe { main_buffer.set_len(capacity); }
+		let mut remaining_buf = main_buffer.as_mut_slice(); // dont care since it's u8
+		let mut chunk_slices = Vec::with_capacity(state.blocks.len());
+
+		for block in &state.blocks {
+			let mask_len = block.match_mask.len();
+			if mask_len == 0 {
+				chunk_slices.push(&mut [] as _);
+				continue;
 			}
+			let (left, right) = remaining_buf.split_at_mut((mask_len - 1) * alignment + elem_size);
+			chunk_slices.push(left);
+			remaining_buf = right;
+		}
+
+		let results: Vec<(usize, MatchMask, Vec<u8>, Vec<u8>)> = state.blocks
+			.par_iter()
+			.zip(chunk_slices)
+			.filter_map(|(block, buf)| {
+				let mask_len = block.match_mask.len();
+				if mask_len == 0 { return None; }
+
+				let read_size = (mask_len - 1) * alignment + elem_size;
+				let desc = BlockDescriptor::new(block.base_address, read_size);
+
+				let read = process.get_chunk_into(&desc, buf).ok()?;
+				let mem = &buf[..read];
+
+				let mut new_mask = MatchMask::repeat(false, mask_len);
+
+				let old_count = block.match_mask.count_ones();
+				let mut current_values = Vec::with_capacity(old_count * elem_size);
+				let mut initial_values = Vec::with_capacity(old_count * elem_size);
+
+				for (k, i) in block.match_mask.iter_ones().enumerate() {
+					let offset = i * alignment;
+					if offset + elem_size > mem.len() {
+						break;
+					}
+
+					let bytes = get!(mem, offset .. offset + elem_size);
+
+					if request.test_bytes(bytes) {
+						new_mask.set(i, true);
+						current_values.extend_from_slice(bytes);
+
+						let old_off = block.data_offset + k * elem_size;
+						initial_values.extend_from_slice(get!(initial, old_off .. old_off + elem_size));
+					}
+				}
+
+				if new_mask.count_ones() == 0 { return None; }
+
+				Some((block.base_address, new_mask, initial_values, current_values))
+			})
+			.collect();
+
+		for (addr, mask, initial_values, current_values) in results {
+			new_state.push_narrowed_block(addr, mask, &initial_values, &current_values);
 		}
 
 		new_state.data.shrink_to_fit();

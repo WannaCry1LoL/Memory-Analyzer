@@ -26,21 +26,23 @@ pub struct MatchingState {
 	/// The alignment that was used to generate the scan
 	pub alignment: usize,
 	pub elem_size: usize,
+	pub initial_scan: bool,
 	pub blocks: Vec<MatchingBlock>,
 	/// Ordered data, contains the initial values. Same size as data.
 	pub initial: Vec<u8>,
 	/// Ordered data, contains the values of the previous scan.
-	pub data: Vec<u8>
+	pub data: Vec<u8>,
 }
 
 impl MatchingState {
-	pub fn new(alignment: usize, elem_size: usize) -> Self {
+	pub fn new(alignment: usize, elem_size: usize, initial_scan: bool) -> Self {
 		Self {
 			alignment,
 			elem_size,
+			initial_scan,
 			initial: vec![],
 			blocks: vec![],
-			data: vec![]
+			data: vec![],
 		}
 	}
 
@@ -48,7 +50,6 @@ impl MatchingState {
 		debug_assert_eq!(values.len(), mask.count_ones() * self.elem_size);
 		let offset = self.data.len();
 		self.data.extend_from_slice(values);
-		self.initial.extend_from_slice(values);
 		self.blocks.push(MatchingBlock { base_address, match_mask: mask, data_offset: offset });
 	}
 
@@ -92,6 +93,7 @@ impl MatchingState {
 
 	pub fn get_match(&self, index: usize) -> Option<(usize, &[u8], &[u8])> {
 		let mut remaining = index;
+		let test = if self.initial_scan { &self.data } else { &self.initial };
 		for block in &self.blocks {
 			let count = block.match_mask.count_ones();
 			if remaining < count {
@@ -101,7 +103,8 @@ impl MatchingState {
 						let addr = block.base_address + i * self.alignment;
 						let slice_start = block.data_offset + local_idx * self.elem_size;
 						let slice_end = slice_start + self.elem_size;
-						return Some((addr, &self.data[slice_start..slice_end], &self.initial[slice_start..slice_end]));
+						
+						return Some((addr, &self.data[slice_start..slice_end], &test[slice_start..slice_end]));
 					}
 					local_idx += 1;
 				}
