@@ -1,3 +1,5 @@
+use rayon::iter::ParallelIterator;
+use rayon::prelude::*;
 use crate::errors::MemoryScanError;
 use crate::matches::MatchingState;
 use crate::mem2disk::{BlockDescriptor, DumpFlags, ScanDiskManager};
@@ -192,7 +194,7 @@ impl MemoryScanner {
 	}
 
 	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
-		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?; // maybe move this somewhere else
+		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?;
 		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
 
 		let alignment = self.options.resolve_alignment(&request);
@@ -200,31 +202,30 @@ impl MemoryScanner {
 		let blocks = self.file_manager.enumerate_blocks();
 		let mut new_state = MatchingState::new(alignment, element_size);
 
-		let cap = blocks.iter().max_by_key(|x| x.size);
-		let allocated = cap.map(|x| x.size).unwrap_or_default();
-		let mut vec = Vec::with_capacity(allocated);
+		let process = &self.process;
 
-		//self.file_manager.write_header(&blocks).map_err(MemoryScanError::MemoryDumpFailed)?;
+		let results: Vec<(usize, MatchMask, Vec<u8>)> = blocks
+			.par_iter()
+			.filter_map(|desc| {
+				let mut buf = vec![0u8; desc.size];
+				let read = process.get_chunk_into(desc, &mut buf).ok()?;
+				let mem = &buf[..read];
 
-		for desc in &blocks {
-			let Ok(read) = self.process.get_chunk_into(desc, &mut vec) else {
-				continue
-			};
-			let mem = &vec[..read];
-			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
+				let mask = request.run(mem, alignment);
+				let ones = mask.count_ones();
+				if ones == 0 { return None; }
 
-			let mask = request.run(mem, alignment);
-			let ones = mask.count_ones();
+				let mut matched: Vec<u8> = Vec::with_capacity(ones * element_size);
+				for i in mask.iter_ones() {
+					matched.extend_from_slice(get!(mem, i * alignment .. i * alignment + element_size));
+				}
 
-			if ones == 0 { continue; }
+				Some((desc.virtual_address, mask, matched))
+			})
+			.collect();
 
-			let mut matched = Vec::with_capacity(ones * element_size);
-			for i in mask.iter_ones() {
-				matched.extend_from_slice(get!(mem, i * alignment .. i * alignment + element_size));
-			}
-
-			//self.file_manager.append_matches(&matched).map_err(MemoryScanError::MemoryDumpFailed)?;
-			new_state.push_block(desc.virtual_address, mask, &matched);
+		for (addr, mask, matched) in results {
+			new_state.push_block(addr, mask, &matched);
 		}
 
 		self.state = new_state;
