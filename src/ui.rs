@@ -1,3 +1,5 @@
+use std::default::Default;
+use crate::matches::MatchingState;
 use crate::memory_scanner::{MemoryScanner, MemoryScannerOptions, ScanRequest, IntCondition, FloatCondition, ValueType};
 use crate::process::Process;
 use crate::ui_types::*;
@@ -13,7 +15,8 @@ use ratatui::{
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use crate::num_helpers::ScanCondition;
+use std::collections::HashMap;
+use std::time::Duration;
 
 const ACCENT: Color = Color::Yellow;
 const EDIT: Color = Color::Green;
@@ -28,6 +31,94 @@ pub enum ScanEvent {
 	},
 }
 
+pub enum WorkerCommand {
+	Write { address: usize, data: Vec<u8> },
+	AddLock { id: usize, address: usize, data: Vec<u8> },
+	RemoveLock { id: usize },
+	ReadBatch { addresses: Vec<(usize, usize)> },
+	Stop
+}
+
+pub enum WorkerEvent {
+	WriteResult { id: Option<usize>, success: bool },
+	ReadResult { values: HashMap<usize, Vec<u8>> },
+	LockFailed { id: usize }
+}
+
+pub fn memory_worker_loop(
+	process: Process,
+	cmd_rx: mpsc::Receiver<WorkerCommand>,
+	event_tx: mpsc::Sender<WorkerEvent>,
+) {
+	let mut locks: HashMap<usize, (usize, Vec<u8>)> = HashMap::new();
+
+	loop {
+		let mut should_continue = true;
+
+		match cmd_rx.recv_timeout(Duration::from_millis(16)) {
+			Ok(cmd) => should_continue = process_command(cmd, &process, &mut locks, &event_tx),
+			Err(mpsc::RecvTimeoutError::Timeout) => {},
+			Err(mpsc::RecvTimeoutError::Disconnected) => break,
+		}
+
+		if !should_continue { break; }
+
+		while let Ok(cmd) = cmd_rx.try_recv() {
+			if !process_command(cmd, &process, &mut locks, &event_tx) {
+				should_continue = false;
+				break;
+			}
+		}
+
+		if !should_continue { break; }
+
+		let mut failed_locks = Vec::new();
+		for (id, (addr, data)) in &locks {
+			if process.write(*addr as _, data).is_err() {
+				failed_locks.push(*id);
+			}
+		}
+
+		for id in failed_locks {
+			locks.remove(&id);
+			let _ = event_tx.send(WorkerEvent::LockFailed { id });
+		}
+	}
+}
+
+fn process_command(
+	cmd: WorkerCommand,
+	process: &Process,
+	locks: &mut HashMap<usize, (usize, Vec<u8>)>,
+	event_tx: &mpsc::Sender<WorkerEvent>
+) -> bool {
+	match cmd {
+		WorkerCommand::Write { address, data } => {
+			let success = process.write(address as _, &data).is_ok();
+			let _ = event_tx.send(WorkerEvent::WriteResult { id: Some(address), success });
+			true
+		}
+		WorkerCommand::AddLock { id, address, data } => {
+			locks.insert(id, (address, data));
+			true
+		}
+		WorkerCommand::RemoveLock { id } => {
+			locks.remove(&id);
+			true
+		}
+		WorkerCommand::ReadBatch { addresses } => {
+			let mut values = HashMap::new();
+			for (addr, size) in addresses {
+				if let Ok(data) = process.read(addr as _, size) {
+					values.insert(addr, data);
+				}
+			}
+			let _ = event_tx.send(WorkerEvent::ReadResult { values });
+			true
+		}
+		WorkerCommand::Stop => false
+	}
+}
 
 pub struct App {
 	pub screen: Screen,
@@ -68,6 +159,9 @@ pub struct App {
 
 	pub is_scanning: bool,
 	pub scan_rx: Option<mpsc::Receiver<ScanEvent>>,
+
+	pub worker_rx: Option<mpsc::Receiver<WorkerEvent>>,
+	pub worker_tx: Option<mpsc::Sender<WorkerCommand>>,
 }
 
 impl App {
@@ -91,7 +185,7 @@ impl App {
 			value_input2: String::new(),
 			alignment: "4".into(),
 			range_start: "0".into(),
-			range_end: "7FFFFFFFFFFFFFFF".into(),
+			range_end: "00007FFFFFFFFFFF".into(),
 			freeze_process: false,
 			writable: TriState::True,
 			executable: TriState::DontCare,
@@ -111,6 +205,9 @@ impl App {
 
 			is_scanning: false,
 			scan_rx: None,
+
+			worker_rx: None,
+			worker_tx: None,
 		}
 	}
 
@@ -145,15 +242,26 @@ impl App {
 
 	pub fn attach_selected(&mut self) {
 		let chosen = self.visible_processes().get(self.process_list_state).map(|p| (*p).clone());
-		if let Some(p) = chosen {
+		if let Some(mut p) = chosen {
+			let clone = p.clone();
 			let opts = MemoryScannerOptions::default();
-			let mut scanner = match MemoryScanner::new(p, opts) {
+			let mut scanner = match MemoryScanner::new(clone, opts) {
 				Ok(s) => s,
 				Err(e) => {
-					self.status = format!("Error attaching: {}", e);
+					self.status = format!("Failed to attach: {}", e);
 					return;
 				}
 			};
+
+			if let Err(e) = p.init_handle() {
+				self.status = format!("Failed to attach: {:?}", e);
+				return;
+			}
+			let (tx_to_worker, rx_worker) = mpsc::channel::<WorkerCommand>();
+			let (tx_from_worker, rx_self) = mpsc::channel::<WorkerEvent>();
+
+			(self.worker_tx, self.worker_rx) = (Some(tx_to_worker), Some(rx_self));
+			thread::spawn(move || memory_worker_loop(p, rx_worker, tx_from_worker));
 
 			self.update_scanner_options(&mut scanner);
 			self.scanner = Some(scanner);
@@ -172,6 +280,11 @@ impl App {
 		self.screen = Screen::ProcessSelect;
 		self.scanner = None;
 		self.status = "Detached. Select a process and press Enter to attach".into();
+		if let Some(r) = &self.worker_tx {
+			r.send(WorkerCommand::Stop).unwrap();
+		}
+		self.worker_rx = None;
+		self.worker_tx = None;
 	}
 
 	/* Focus / Navigation */
@@ -269,8 +382,28 @@ impl App {
 					self.process_list_state = 0;
 				}
 				FieldTarget::SavedValue => {
-					if let Some(e) = self.saved.get_mut(self.saved_selected) {
-						e.value = self.edit_buffer.clone();
+					if self.saved_selected < self.saved.len() {
+						let value_type = self.saved[self.saved_selected].value_type;
+						let address = self.saved[self.saved_selected].address;
+						let locked = self.saved[self.saved_selected].locked;
+
+						match parse_value_bytes(value_type, &self.edit_buffer) {
+							Ok(data) => {
+								self.saved[self.saved_selected].value = format_bytes(&data, value_type);
+								if let Some(tx) = &self.worker_tx {
+									if locked {
+										// Keep the frozen value in sync with the edit.
+										let _ = tx.send(WorkerCommand::AddLock { id: address, address, data });
+									} else {
+										let _ = tx.send(WorkerCommand::Write { address, data });
+									}
+								}
+								self.status = "Value written".into();
+							}
+							Err(err) => {
+								self.status = err;
+							}
+						}
 					}
 				}
 				FieldTarget::SavedDescription => {
@@ -325,15 +458,43 @@ impl App {
 	}
 
 	pub fn toggle_lock_selected_saved(&mut self) {
-		if let Some(entry) = self.saved.get_mut(self.saved_selected) {
-			entry.locked = !entry.locked;
-			self.status = if entry.locked { "Locked - value will be frozen".into() } else { "Unlocked".into() };
+		if self.saved_selected >= self.saved.len() { return; }
+
+		let now_locked = !self.saved[self.saved_selected].locked;
+		let address = self.saved[self.saved_selected].address;
+		let value_type = self.saved[self.saved_selected].value_type;
+		let value_str = self.saved[self.saved_selected].value.clone();
+
+		if now_locked {
+			match parse_value_bytes(value_type, &value_str) {
+				Ok(data) => {
+					self.saved[self.saved_selected].locked = true;
+					if let Some(tx) = &self.worker_tx {
+						let _ = tx.send(WorkerCommand::AddLock { id: address, address, data });
+					}
+					self.status = "Locked - value will be frozen".into();
+				}
+				Err(err) => {
+					self.status = format!("Cannot lock: {}", err);
+				}
+			}
+		} else {
+			self.saved[self.saved_selected].locked = false;
+			if let Some(tx) = &self.worker_tx {
+				let _ = tx.send(WorkerCommand::RemoveLock { id: address });
+			}
+			self.status = "Unlocked".into();
 		}
 	}
 
 	pub fn remove_selected_saved(&mut self) {
 		if self.saved_selected < self.saved.len() {
-			self.saved.remove(self.saved_selected);
+			let removed = self.saved.remove(self.saved_selected);
+			if removed.locked {
+				if let Some(tx) = &self.worker_tx {
+					let _ = tx.send(WorkerCommand::RemoveLock { id: removed.address });
+				}
+			}
 			if self.saved_selected > 0 && self.saved_selected >= self.saved.len() {
 				self.saved_selected -= 1;
 			}
@@ -388,11 +549,11 @@ impl App {
 					UiValueType::Float => ValueType::Float(cond),
 					_ => unreachable!()
 				};
-				Ok(ScanRequest { value_type, compare_to_first_scan: self.has_first_scan, freeze_process: false })
+				Ok(ScanRequest { value_type, compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
 			}
 			UiValueType::ArrayOfByte => {
 				let bArr = string_to_bytes_hex(&self.value_input).map_err(|_| "Invalid Byte Array".to_string())?;
-				Ok(ScanRequest { value_type: ValueType::ByteArray(bArr), compare_to_first_scan: self.has_first_scan, freeze_process: false })
+				Ok(ScanRequest { value_type: ValueType::ByteArray(bArr), compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
 			}
 			_ => {
 				let cond = match self.scan_mode {
@@ -408,13 +569,22 @@ impl App {
 					UiValueType::Qword => ValueType::EightBytes(cond),
 					_ => unreachable!()
 				};
-				Ok(ScanRequest { value_type, compare_to_first_scan: self.has_first_scan, freeze_process: false })
+				Ok(ScanRequest { value_type, compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
 			}
 		}
 	}
 
 	pub fn trigger_scan(&mut self) {
-		self.start_scan(false);
+		if self.is_scanning {
+			self.status = "Scan already in progress...".into();
+			return;
+		}
+
+		if self.has_first_scan {
+			self.reset_scan_state();
+		} else {
+			self.start_scan(false);
+		}
 	}
 
 	pub fn trigger_next_scan(&mut self) {
@@ -423,6 +593,17 @@ impl App {
 			return;
 		}
 		self.start_scan(true);
+	}
+
+	fn reset_scan_state(&mut self) {
+		if let Some(scanner) = self.scanner.as_mut() {
+			scanner.state = MatchingState::new(1, 1);
+		}
+		self.has_first_scan = false;
+		self.scan_count = 0;
+		self.results_selected = 0;
+		self.focus = Focus::ScanBtn;
+		self.status = "Scan reset. Enter a value and press First Scan".into();
 	}
 
 	fn start_scan(&mut self, narrow: bool) {
@@ -480,6 +661,51 @@ impl App {
 			}
 		}
 	}
+
+	/* Worker Communication (writing / locking / live reads) */
+
+	pub fn poll_worker_events(&mut self) {
+		if let Some(rx) = &self.worker_rx {
+			while let Ok(event) = rx.try_recv() {
+				match event {
+					WorkerEvent::WriteResult { id, success } => {
+						if !success {
+							self.status = match id {
+								Some(addr) => format!("Failed to write value at 0x{:X}", addr),
+								None => "Failed to write value".into(),
+							};
+						}
+					}
+					WorkerEvent::ReadResult { values } => {
+						for (i, e) in self.saved.iter_mut().enumerate() {
+							if self.editing_target == Some(FieldTarget::SavedValue) && self.saved_selected == i {
+								continue;
+							}
+							if let Some(bytes) = values.get(&e.address) {
+								e.value = format_bytes(bytes, e.value_type);
+							}
+						}
+					}
+					WorkerEvent::LockFailed { id } => {
+						for e in self.saved.iter_mut() {
+							if e.address == id {
+								e.locked = false;
+							}
+						}
+						self.status = format!("Lock on 0x{:X} failed - address may be invalid", id);
+					}
+				}
+			}
+		}
+	}
+
+	pub fn refresh_saved_values(&mut self) {
+		if self.saved.is_empty() { return; }
+		if let Some(tx) = &self.worker_tx {
+			let addresses: Vec<(usize, usize)> = self.saved.iter().map(|e| (e.address, saved_entry_size(e))).collect();
+			let _ = tx.send(WorkerCommand::ReadBatch { addresses });
+		}
+	}
 }
 
 pub fn format_bytes(bytes: &[u8], value_type: UiValueType) -> String {
@@ -492,6 +718,31 @@ pub fn format_bytes(bytes: &[u8], value_type: UiValueType) -> String {
 		UiValueType::Double if bytes.len() >= 8 => format!("{}", f64::from_le_bytes(bytes[..8].try_into().unwrap())),
 		UiValueType::ArrayOfByte => bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" "),
 		_ => "?".to_string(),
+	}
+}
+
+pub fn parse_value_bytes(value_type: UiValueType, s: &str) -> Result<Vec<u8>, String> {
+	let s = s.trim();
+	match value_type {
+		UiValueType::Byte => s.parse::<i128>().map(|n| vec![n as u8]).map_err(|_| format!("Invalid byte value: {}", s)),
+		UiValueType::Word => s.parse::<i128>().map(|n| (n as u16).to_le_bytes().to_vec()).map_err(|_| format!("Invalid value: {}", s)),
+		UiValueType::Dword => s.parse::<i128>().map(|n| (n as u32).to_le_bytes().to_vec()).map_err(|_| format!("Invalid value: {}", s)),
+		UiValueType::Qword => s.parse::<i128>().map(|n| (n as u64).to_le_bytes().to_vec()).map_err(|_| format!("Invalid value: {}", s)),
+		UiValueType::Float => s.parse::<f32>().map(|n| n.to_le_bytes().to_vec()).map_err(|_| format!("Invalid float value: {}", s)),
+		UiValueType::Double => s.parse::<f64>().map(|n| n.to_le_bytes().to_vec()).map_err(|_| format!("Invalid double value: {}", s)),
+		UiValueType::ArrayOfByte => string_to_bytes_hex(s).map_err(|_| "Invalid byte array".to_string()),
+	}
+}
+
+fn saved_entry_size(entry: &SavedEntry) -> usize {
+	match entry.value_type {
+		UiValueType::Byte => 1,
+		UiValueType::Word => 2,
+		UiValueType::Dword => 4,
+		UiValueType::Qword => 8,
+		UiValueType::Float => 4,
+		UiValueType::Double => 8,
+		UiValueType::ArrayOfByte => entry.value.split_whitespace().count().max(1),
 	}
 }
 

@@ -181,7 +181,7 @@ impl MemoryScanner {
 			.map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{:?}", e)))?;
 		let handle = process.get_handle();
 
-		let file_manager = ScanDiskManager::new(handle, options.dump_options)?;
+		let file_manager = ScanDiskManager::new(handle, options.dump_options);
 
 		Ok(Self {
 			file_manager,
@@ -200,21 +200,28 @@ impl MemoryScanner {
 		let blocks = self.file_manager.enumerate_blocks();
 		let mut new_state = MatchingState::new(alignment, element_size);
 
+		let cap = blocks.iter().max_by_key(|x| x.size);
+		let allocated = cap.map(|x| x.size).unwrap_or_default();
+		let mut vec = Vec::with_capacity(allocated);
+
 		//self.file_manager.write_header(&blocks).map_err(MemoryScanError::MemoryDumpFailed)?;
 
 		for desc in &blocks {
-			let Ok(mem) = self.process.get_chunk(desc) else {
+			let Ok(read) = self.process.get_chunk_into(desc, &mut vec) else {
 				continue
 			};
+			let mem = &vec[..read];
 			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
 
-			let mask = request.run(&mem, alignment);
-			if mask.count_ones() == 0 { continue; }
+			let mask = request.run(mem, alignment);
+			let ones = mask.count_ones();
 
-			let matched: Vec<u8> = mask
-				.iter_ones()
-				.flat_map(|i| get!(mem, i * alignment .. i * alignment + element_size).iter().copied())
-				.collect();
+			if ones == 0 { continue; }
+
+			let mut matched = Vec::with_capacity(ones * element_size);
+			for i in mask.iter_ones() {
+				matched.extend_from_slice(get!(mem, i * alignment .. i * alignment + element_size));
+			}
 
 			//self.file_manager.append_matches(&matched).map_err(MemoryScanError::MemoryDumpFailed)?;
 			new_state.push_block(desc.virtual_address, mask, &matched);
@@ -236,6 +243,10 @@ impl MemoryScanner {
 
 		let mut new_state = MatchingState::new(alignment, elem_size);
 
+		let cap = self.state.blocks.iter().map(|x| (x.match_mask.len() - 1) * alignment * elem_size).max();
+		let allocated = cap.unwrap_or_default();
+		let mut vec = Vec::with_capacity(allocated);
+
 		for block in &self.state.blocks {
 			let mask_len = block.match_mask.len();
 			if mask_len == 0 { continue; }
@@ -243,9 +254,11 @@ impl MemoryScanner {
 			let read_size = (mask_len - 1) * alignment + elem_size;
 			let desc = BlockDescriptor::new(block.base_address, read_size);
 
-			let Ok(mem) = self.process.get_chunk(&desc) else {
+			let Ok(read) = self.process.get_chunk_into(&desc, &mut vec) else {
 				continue
 			};
+			
+			let mem = &vec[..read];
 
 			let mut new_mask = MatchMask::repeat(false, mask_len);
 

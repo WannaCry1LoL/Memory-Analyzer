@@ -67,13 +67,14 @@ impl BlockDescriptor {
 
 pub struct ScanDiskManager {
 	handle: Handle,
-	initial_scan_file: File,
-	scan_file: File,
+	//initial_scan_file: File,
+	//scan_file: File,
 	flags: DumpFlags
 }
 
 impl ScanDiskManager {
-	pub fn new(handle: Handle, flags: DumpFlags) -> std::io::Result<ScanDiskManager> {
+	pub fn new(handle: Handle, flags: DumpFlags) -> Self /*std::io::Result<ScanDiskManager>*/ {
+		/*
 		let mut dir = std::env::temp_dir();
 		dir.push("MemScanner");
 		match fs::create_dir(&dir) {
@@ -90,8 +91,9 @@ impl ScanDiskManager {
 		let scan_file = OpenOptions::new()
 			.read(true).write(true).create(true).truncate(true)
 			.open(dir.join(format!("scan_{pid}.dat")))?;
+		 */
 
-		Ok(ScanDiskManager { handle, initial_scan_file, scan_file, flags })
+		ScanDiskManager { handle, flags }
 	}
 
 	pub fn enumerate_blocks(&self) -> Vec<BlockDescriptor> {
@@ -121,7 +123,7 @@ impl ScanDiskManager {
 		}
 		blocks
 	}
-
+	/*
 	pub fn write_header(&mut self, blocks: &[BlockDescriptor]) -> std::io::Result<()> {
 		let header = FileHeader::new(blocks.len());
 		self.initial_scan_file.seek(SeekFrom::Start(0))?;
@@ -144,6 +146,7 @@ impl ScanDiskManager {
 	pub fn append_matches(&mut self, bytes: &[u8]) -> std::io::Result<()> {
 		self.scan_file.write_all(bytes)
 	}
+	 */
 }
 
 unsafe impl Send for ScanDiskManager {}
