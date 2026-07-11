@@ -1,9 +1,6 @@
+use crate::externs::*;
 use crate::utils::TriState;
 use crate::utils::TriState::{DontCare, False, True};
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::{fs, slice};
-use crate::externs::*;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DumpFlags {
@@ -98,7 +95,7 @@ impl ScanDiskManager {
 
 	pub fn enumerate_blocks(&self) -> Vec<BlockDescriptor> {
 		let max_addr = self.flags.end_address as _;
-		let mut blocks = Vec::new();
+		let mut blocks: Vec<BlockDescriptor> = Vec::new();
 		let mut base_addr = self.flags.start_address as _;
 
 		loop {
@@ -110,9 +107,16 @@ impl ScanDiskManager {
 
 			if self.flags.page_flags_match(info.protect)
 				&& info.state == MEM_COMMIT
-				&& matches!(info.typ, MEM_PRIVATE | MEM_IMAGE) {
-				blocks.push(BlockDescriptor::new(base_addr as usize, info.region_size));
+				&& matches!(info.typ, MEM_PRIVATE | MEM_IMAGE)
+			{
+				let region_start = base_addr as usize;
+
+				match blocks.last_mut() {
+					Some(last) if last.virtual_address + last.size == region_start => last.size += info.region_size,
+					_ => blocks.push(BlockDescriptor::new(region_start, info.region_size))
+				}
 			}
+
 			base_addr = unsafe { base_addr.byte_add(info.region_size) };
 		}
 

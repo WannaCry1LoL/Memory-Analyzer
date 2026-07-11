@@ -95,7 +95,7 @@ impl UiValueType {
 		let all = Self::ALL;
 		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
 		let len = all.len() as i32;
-		all[((idx + dir).rem_euclid(len)) as usize]
+		all[(idx + dir).rem_euclid(len) as usize]
 	}
 
 	pub fn natural_alignment(self) -> usize {
@@ -130,7 +130,7 @@ impl RoundingMode {
 		let all = Self::ALL;
 		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
 		let len = all.len() as i32;
-		all[((idx + dir).rem_euclid(len)) as usize]
+		all[(idx + dir).rem_euclid(len) as usize]
 	}
 }
 
@@ -174,13 +174,15 @@ impl ScanMode {
 		let all = Self::ALL;
 		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
 		let len = all.len() as i32;
-		all[((idx + dir).rem_euclid(len)) as usize]
+		all[(idx + dir).rem_euclid(len) as usize]
 	}
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchEntry {
+	pub original_index: usize,
 	pub address: usize,
+	pub size: usize,
 	pub value: String,
 	pub previous: String,
 }

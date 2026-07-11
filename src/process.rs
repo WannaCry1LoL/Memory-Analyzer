@@ -164,27 +164,15 @@ impl Process {
 
 	#[inline]
 	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
-		debug_assert!(!self.handle.is_invalid());
 		let mut buffer = Vec::with_capacity(block_descriptor.size);
-		unsafe { buffer.set_len(block_descriptor.size) };
-
-		let read_count = read_bytes(
-			self.handle,
-			block_descriptor.virtual_address as _,
-			buffer.as_mut_ptr(),
-			block_descriptor.size
-		)?;
-
-		buffer.truncate(read_count);
-		Ok(buffer)
+		self.get_chunk_into(block_descriptor, &mut buffer)
+			.map(|_| buffer)
 	}
 
 	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut Vec<u8>) -> Result<usize, MemoryReadError> {
 		debug_assert!(!self.handle.is_invalid());
 		if buffer.len() < block_descriptor.size {
-			buffer.resize(block_descriptor.size, 0);
-		} else {
-			unsafe { buffer.set_len(block_descriptor.size) };
+			buffer.reserve(block_descriptor.size - buffer.len());
 		}
 
 		let read_count = read_bytes(
@@ -194,7 +182,7 @@ impl Process {
 			block_descriptor.size
 		)?;
 
-		buffer.truncate(read_count);
+		unsafe { buffer.set_len(read_count) };
 		Ok(read_count)
 	}
 

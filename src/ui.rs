@@ -13,7 +13,7 @@ use ratatui::{
 	Frame,
 };
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc};
 use std::thread;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -162,6 +162,11 @@ pub struct App {
 
 	pub worker_rx: Option<mpsc::Receiver<WorkerEvent>>,
 	pub worker_tx: Option<mpsc::Sender<WorkerCommand>>,
+
+	pub visible_matches: Vec<MatchEntry>,
+	pub visible_start_idx: usize,
+	pub visible_end_idx: usize,
+	pub scan_just_finished: bool,
 }
 
 impl App {
@@ -208,6 +213,11 @@ impl App {
 
 			worker_rx: None,
 			worker_tx: None,
+
+			visible_matches: Vec::new(),
+			visible_start_idx: 0,
+			visible_end_idx: 0,
+			scan_just_finished: false,
 		}
 	}
 
@@ -290,22 +300,36 @@ impl App {
 	/* Focus / Navigation */
 
 	pub fn tab_order(&self) -> Vec<Focus> {
-		let mut order = vec![Focus::ValueType, Focus::ScanMode];
+		let mut order = vec![];
+
+		if !self.has_first_scan {
+			order.push(Focus::ValueType);
+		}
+
+		order.push(Focus::ScanMode);
 		if self.scan_mode.needs_value() {
 			order.push(Focus::ValueInput);
 			if self.scan_mode.needs_second_value() {
 				order.push(Focus::ValueInput2);
 			}
 		}
-		order.push(Focus::Alignment);
-		order.push(Focus::RangeStart);
-		order.push(Focus::RangeEnd);
+
+		if !self.has_first_scan {
+			order.push(Focus::Alignment);
+			order.push(Focus::RangeStart);
+			order.push(Focus::RangeEnd);
+		}
+
 		if self.value_type.is_float() {
 			order.push(Focus::RoundingMode);
 		}
-		order.push(Focus::Writable);
-		order.push(Focus::Executable);
-		order.push(Focus::CopyOnWrite);
+
+		if !self.has_first_scan {
+			order.push(Focus::Writable);
+			order.push(Focus::Executable);
+			order.push(Focus::CopyOnWrite);
+		}
+
 		order.push(Focus::FreezeProcess);
 		order.push(Focus::ScanBtn);
 		if self.has_first_scan {
@@ -392,7 +416,6 @@ impl App {
 								self.saved[self.saved_selected].value = format_bytes(&data, value_type);
 								if let Some(tx) = &self.worker_tx {
 									if locked {
-										// Keep the frozen value in sync with the edit.
 										let _ = tx.send(WorkerCommand::AddLock { id: address, address, data });
 									} else {
 										let _ = tx.send(WorkerCommand::Write { address, data });
@@ -502,7 +525,7 @@ impl App {
 		}
 	}
 
-	/* Scanning Logic */
+	// Scanning Logic
 
 	pub fn update_scanner_options(&self, scanner: &mut MemoryScanner) {
 		scanner.options.dump_options.writable = self.writable;
@@ -552,8 +575,8 @@ impl App {
 				Ok(ScanRequest { value_type, compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
 			}
 			UiValueType::ArrayOfByte => {
-				let bArr = string_to_bytes_hex(&self.value_input).map_err(|_| "Invalid Byte Array".to_string())?;
-				Ok(ScanRequest { value_type: ValueType::ByteArray(bArr), compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
+				let b_arr = string_to_bytes_hex(&self.value_input).map_err(|_| "Invalid Byte Array".to_string())?;
+				Ok(ScanRequest { value_type: ValueType::ByteArray(b_arr), compare_to_first_scan: self.has_first_scan, freeze_process: self.freeze_process })
 			}
 			_ => {
 				let cond = match self.scan_mode {
@@ -604,6 +627,7 @@ impl App {
 		self.results_selected = 0;
 		self.focus = Focus::ScanBtn;
 		self.status = "Scan reset. Enter a value and press First Scan".into();
+		self.scan_just_finished = true;
 	}
 
 	fn start_scan(&mut self, narrow: bool) {
@@ -649,6 +673,7 @@ impl App {
 									let total = self.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
 									self.status = format!("Found {} matches.", total);
 									self.focus = Focus::ResultsList;
+									self.scan_just_finished = true;
 								}
 								Err(e) => self.status = format!("Scan error: {}", e),
 							}
@@ -662,7 +687,7 @@ impl App {
 		}
 	}
 
-	/* Worker Communication (writing / locking / live reads) */
+	/* Worker stuff */
 
 	pub fn poll_worker_events(&mut self) {
 		if let Some(rx) = &self.worker_rx {
@@ -685,6 +710,12 @@ impl App {
 								e.value = format_bytes(bytes, e.value_type);
 							}
 						}
+
+						for entry in &mut self.visible_matches {
+							if let Some(bytes) = values.get(&entry.address) {
+								entry.value = format_bytes(bytes, self.value_type);
+							}
+						}
 					}
 					WorkerEvent::LockFailed { id } => {
 						for e in self.saved.iter_mut() {
@@ -703,6 +734,56 @@ impl App {
 		if self.saved.is_empty() { return; }
 		if let Some(tx) = &self.worker_tx {
 			let addresses: Vec<(usize, usize)> = self.saved.iter().map(|e| (e.address, saved_entry_size(e))).collect();
+			let _ = tx.send(WorkerCommand::ReadBatch { addresses });
+		}
+	}
+
+	pub fn update_visible_matches_cache(&mut self, visible_rows: usize) {
+		let total_matches = self.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
+
+		let mut start_idx = 0;
+		if total_matches > visible_rows {
+			if self.results_selected >= visible_rows / 2 {
+				start_idx = self.results_selected - visible_rows / 2;
+				if start_idx + visible_rows > total_matches {
+					start_idx = total_matches.saturating_sub(visible_rows);
+				}
+			}
+		}
+		let end_idx = (start_idx + visible_rows).min(total_matches);
+
+		let needs_rebuild = self.visible_start_idx != start_idx
+			|| self.visible_end_idx != end_idx
+			|| self.scan_just_finished;
+
+		if needs_rebuild {
+			self.visible_start_idx = start_idx;
+			self.visible_end_idx = end_idx;
+			self.scan_just_finished = false;
+
+			self.visible_matches.clear();
+			if let Some(scanner) = &self.scanner {
+				for i in start_idx..end_idx {
+					if let Some((addr, bytes, initial)) = scanner.state.get_match(i) {
+						self.visible_matches.push(MatchEntry {
+							original_index: i,
+							address: addr,
+							size: bytes.len(),
+							value: format_bytes(bytes, self.value_type),
+							previous: format_bytes(initial, self.value_type),
+						});
+					}
+				}
+			}
+
+			self.refresh_visible_matches();
+		}
+	}
+
+	pub fn refresh_visible_matches(&mut self) {
+		if self.visible_matches.is_empty() { return; }
+		if let Some(tx) = &self.worker_tx {
+			let addresses: Vec<(usize, usize)> = self.visible_matches.iter().map(|e| (e.address, e.size)).collect();
 			let _ = tx.send(WorkerCommand::ReadBatch { addresses });
 		}
 	}
@@ -746,9 +827,9 @@ fn saved_entry_size(entry: &SavedEntry) -> usize {
 	}
 }
 
-/* UI Drawing */
+/* Drawing */
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
 	match app.screen {
 		Screen::ProcessSelect => draw_process_select(f, app),
 		Screen::Scanner => draw_scanner(f, app),
@@ -756,6 +837,15 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn box_style(app: &App, focus: Focus) -> Style {
+	let is_locked = app.has_first_scan && matches!(focus,
+		Focus::ValueType | Focus::Alignment | Focus::RangeStart |
+		Focus::RangeEnd | Focus::Writable | Focus::Executable |
+		Focus::CopyOnWrite
+	);
+	if is_locked {
+		return Style::default().fg(DIM);
+	}
+
 	if app.focus == focus {
 		if app.input_mode == InputMode::Editing {
 			Style::default().fg(EDIT).add_modifier(Modifier::BOLD)
@@ -789,7 +879,7 @@ fn draw_process_select(f: &mut Frame, app: &App) {
 
 	let title = Paragraph::new("  Process List  ")
 		.style(Style::default().fg(Color::White).bg(HEADER_BG).add_modifier(Modifier::BOLD))
-		.block(Block::default().borders(Borders::ALL).title(" CE-TUI "));
+		.block(Block::default().borders(Borders::ALL).title(" MemScan "));
 	f.render_widget(title, chunks[0]);
 
 	let filter_text = field_text(app, FieldTarget::ProcessFilter, &app.process_filter);
@@ -810,8 +900,7 @@ fn draw_process_select(f: &mut Frame, app: &App) {
 		.iter()
 		.enumerate()
 		.map(|(i, p)| {
-			let selected = i == app.process_list_state;
-			let style = if selected {
+			let style = if i == app.process_list_state {
 				Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
 			} else {
 				Style::default().fg(Color::White)
@@ -819,67 +908,49 @@ fn draw_process_select(f: &mut Frame, app: &App) {
 			Row::new(vec![
 				Cell::from(p.get_pid().to_string()),
 				Cell::from(p.format_name()),
-			])
-				.style(style)
-		})
-		.collect();
+			]).style(style)
+		}).collect();
 
 	let table = Table::new(
 		rows,
 		[Constraint::Length(10), Constraint::Length(40)],
 	)
 		.header(
-			Row::new(vec!["PID", "Process Name"])
-				.style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+			Row::new(vec!["PID", "Process Name"]).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
 		)
 		.block(Block::default().borders(Borders::ALL).title(format!(" Processes ({}) ", procs.len())));
 	f.render_widget(table, chunks[2]);
 
-	let help = Paragraph::new(
-		"\u{2191}/\u{2193} or j/k: move   Enter: attach   /: filter   r: refresh   q: quit",
-	)
+	let help = Paragraph::new("↑/↓ or j/k: move   Enter: attach   /: filter   r: refresh   q: quit")
 		.style(Style::default().fg(DIM))
 		.block(Block::default().borders(Borders::ALL).title(" Help "));
 	f.render_widget(help, chunks[3]);
 }
 
-fn draw_results(f: &mut Frame, app: &App, area: Rect) {
+fn draw_results(f: &mut Frame, app: &mut App, area: Rect) {
 	let border_style = box_style(app, Focus::ResultsList);
 	let header = Row::new(vec!["Address", "Value", "Previous"])
 		.style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
 
 	let total_matches = app.scanner.as_ref().map(|s| s.state.total_matches()).unwrap_or(0);
-
 	let visible_rows = area.height.saturating_sub(3) as usize;
 
-	let mut start_idx = 0;
-	if total_matches > visible_rows {
-		if app.results_selected >= visible_rows / 2 {
-			start_idx = app.results_selected - visible_rows / 2;
-			if start_idx + visible_rows > total_matches {
-				start_idx = total_matches.saturating_sub(visible_rows);
-			}
-		}
-	}
+	app.update_visible_matches_cache(visible_rows);
 
-	let end_idx = (start_idx + visible_rows).min(total_matches);
+	let mut rows: Vec<Row> = Vec::with_capacity(app.visible_matches.len());
+	for entry in &app.visible_matches {
+		let is_selected = entry.original_index == app.results_selected && app.focus == Focus::ResultsList;
+		let style = if is_selected {
+			Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+		} else {
+			Style::default().fg(Color::White)
+		};
 
-	let mut rows: Vec<Row> = Vec::with_capacity(end_idx - start_idx);
-	if let Some(scanner) = &app.scanner {
-		for i in start_idx..end_idx {
-			let selected = i == app.results_selected && app.focus == Focus::ResultsList;
-			let style = if selected {
-				Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
-			} else {
-				Style::default().fg(Color::White)
-			};
-
-			if let Some((addr, bytes, initial)) = scanner.state.get_match(i) {
-				let value = format_bytes(bytes, app.value_type);
-				let value2 = format_bytes(initial, app.value_type);
-				rows.push(Row::new(vec![format!("0x{:X}", addr), value, value2]).style(style));
-			}
-		}
+		rows.push(Row::new(vec![
+			format!("0x{:X}", entry.address),
+			entry.value.clone(),
+			entry.previous.clone()
+		]).style(style));
 	}
 
 	let title = format!(
@@ -894,7 +965,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
 	f.render_widget(table, area);
 }
 
-fn draw_scanner(f: &mut Frame, app: &App) {
+fn draw_scanner(f: &mut Frame, app: &mut App) {
 	let area = f.area();
 	let outer = Layout::default()
 		.direction(Direction::Vertical)
