@@ -243,7 +243,7 @@ impl MemoryScanner {
 
 		let mut new_state = MatchingState::new(alignment, elem_size);
 
-		let cap = self.state.blocks.iter().map(|x| (x.match_mask.len() - 1) * alignment * elem_size).max();
+		let cap = self.state.blocks.iter().map(|x| (x.match_mask.len() - 1) * alignment + elem_size).max();
 		let allocated = cap.unwrap_or_default();
 		let mut vec = Vec::with_capacity(allocated);
 
