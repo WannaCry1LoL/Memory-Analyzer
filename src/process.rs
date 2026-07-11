@@ -179,6 +179,25 @@ impl Process {
 		Ok(buffer)
 	}
 
+	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut Vec<u8>) -> Result<usize, MemoryReadError> {
+		debug_assert!(!self.handle.is_invalid());
+		if buffer.len() < block_descriptor.size {
+			buffer.resize(block_descriptor.size, 0);
+		} else {
+			unsafe { buffer.set_len(block_descriptor.size) };
+		}
+
+		let read_count = read_bytes(
+			self.handle,
+			block_descriptor.virtual_address as _,
+			buffer.as_mut_ptr(),
+			block_descriptor.size
+		)?;
+
+		buffer.truncate(read_count);
+		Ok(read_count)
+	}
+
 	pub fn write(&self, addr: *mut u8, bytes: &[u8]) -> Result<(), MemoryWriteError> {
 		write_bytes(self.handle, addr, bytes.as_ptr(), bytes.len())
 	}

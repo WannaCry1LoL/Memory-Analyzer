@@ -200,15 +200,20 @@ impl MemoryScanner {
 		let blocks = self.file_manager.enumerate_blocks();
 		let mut new_state = MatchingState::new(alignment, element_size);
 
+		let cap = blocks.iter().max_by_key(|x| x.size);
+		let allocated = cap.map(|x| x.size).unwrap_or_default();
+		let mut vec = Vec::with_capacity(allocated);
+
 		//self.file_manager.write_header(&blocks).map_err(MemoryScanError::MemoryDumpFailed)?;
 
 		for desc in &blocks {
-			let Ok(mem) = self.process.get_chunk(desc) else {
+			let Ok(read) = self.process.get_chunk_into(desc, &mut vec) else {
 				continue
 			};
+			let mem = &vec[..read];
 			//self.file_manager.write_block(desc, &mem).map_err(MemoryScanError::MemoryDumpFailed)?;
 
-			let mask = request.run(&mem, alignment);
+			let mask = request.run(mem, alignment);
 			let ones = mask.count_ones();
 
 			if ones == 0 { continue; }
@@ -238,6 +243,10 @@ impl MemoryScanner {
 
 		let mut new_state = MatchingState::new(alignment, elem_size);
 
+		let cap = self.state.blocks.iter().map(|x| (x.match_mask.len() - 1) * alignment * elem_size).max();
+		let allocated = cap.unwrap_or_default();
+		let mut vec = Vec::with_capacity(allocated);
+
 		for block in &self.state.blocks {
 			let mask_len = block.match_mask.len();
 			if mask_len == 0 { continue; }
@@ -245,9 +254,11 @@ impl MemoryScanner {
 			let read_size = (mask_len - 1) * alignment + elem_size;
 			let desc = BlockDescriptor::new(block.base_address, read_size);
 
-			let Ok(mem) = self.process.get_chunk(&desc) else {
+			let Ok(read) = self.process.get_chunk_into(&desc, &mut vec) else {
 				continue
 			};
+			
+			let mem = &vec[..read];
 
 			let mut new_mask = MatchMask::repeat(false, mask_len);
 
