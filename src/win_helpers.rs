@@ -123,39 +123,37 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation
 	None
 }
 
-pub fn enable_debug_privilege() -> Result<(), ElevationError> {
-	unsafe {
-		let token = open_process_token(
-			Handle::CURRENT_PROCESS,
-			TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
-		).map_err(|_| ElevationError::Unknown)?;
+pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
+	let token = open_process_token(
+		Handle::CURRENT_PROCESS,
+		TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+	).map_err(|_| ElevationError::Unknown)?;
 
-		let guard = OwnedHandle::from_raw_handle(token.0);
+	let guard = OwnedHandle::from_raw_handle(token.0);
 
-		let mut luid = Luid::default();
-		let priv_name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
+	let mut luid = Luid::default();
+	let priv_name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
 
-		if LookupPrivilegeValueW(null(), priv_name.as_ptr(), &mut luid) == 0 {
-			return Err(ElevationError::PrivilegeLookupFailed)
-		};
+	if LookupPrivilegeValueW(null(), priv_name.as_ptr(), &mut luid) == 0 {
+		return Err(ElevationError::PrivilegeLookupFailed)
+	};
 
-		let mut tp = TokenPrivileges::default();
-		tp.privilege_count = 1;
-		tp.privileges[0].luid = luid;
-		tp.privileges[0].attributes = SE_PRIVILEGE_ENABLED;
+	let mut tp = TokenPrivileges::default();
+	tp.privilege_count = 1;
+	tp.privileges[0].luid = luid;
+	tp.privileges[0].attributes = SE_PRIVILEGE_ENABLED;
 
-		adjust_token_privileges(
-			guard.into(),
-			false,
-			Some(&tp),
-			size_of::<TokenPrivileges>() as _,
-			None,
-			None
-		).map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
+	adjust_token_privileges(
+		guard.into(),
+		false,
+		Some(&tp),
+		size_of::<TokenPrivileges>() as _,
+		None,
+		None
+	).map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
 
-		match RtlGetLastWin32Error() {
-			Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
-			_ => Ok(())
-		}
+	match RtlGetLastWin32Error() {
+		Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
+		_ => Ok(())
 	}
-}
+} }
