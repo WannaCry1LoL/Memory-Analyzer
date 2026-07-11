@@ -26,7 +26,7 @@ pub enum ProcessOperationError {
 
 #[derive(Debug)]
 pub enum MemoryScanError {
-	/// The memory dump failed because an error occured while dumping process memory
+	/// The memory dump failed because an error occurred while dumping process memory
 	MemoryDumpFailed(std::io::Error),
 	MemoryReadFailed(MemoryReadError),
 	HandleInitFailed,
@@ -35,7 +35,7 @@ pub enum MemoryScanError {
 
 #[derive(Debug)]
 pub enum MemoryReadError {
-	/// NtReadVirtualMemory returned less bytes read than requested
+	/// NtReadVirtualMemory returned fewer bytes read than requested
 	NotEnoughBytesRead,
 
 	/// The passed buffer was too small
@@ -49,7 +49,7 @@ pub enum MemoryReadError {
 
 #[derive(Debug)]
 pub enum MemoryWriteError {
-	/// NtWriteVirtualMemory returned less bytes written than requested
+	/// NtWriteVirtualMemory returned fewer bytes written than requested
 	NotEnoughBytesWritten,
 	Other(NtStatus),
 }
