@@ -195,7 +195,8 @@ impl MemoryScanner {
 
 	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
 		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?;
-		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
+
+		let _guard = request.freeze_process.then(|| self.process.suspend_guard().ok()).flatten();
 
 		let alignment = self.options.resolve_alignment(&request);
 		let element_size = request.element_size();
@@ -257,7 +258,7 @@ impl MemoryScanner {
 			return Err(MemoryScanError::IncompatibleScanType);
 		}
 
-		let _guard = if request.freeze_process { self.process.suspend_guard().ok() } else { None };
+		let _guard = request.freeze_process.then(|| self.process.suspend_guard().ok()).flatten();
 
 		let mut new_state = MatchingState::new(alignment, elem_size, false);
 
