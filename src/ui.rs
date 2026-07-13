@@ -1027,7 +1027,7 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect) {
 	]);
 	let bar = Paragraph::new(text)
 		.style(Style::default().bg(HEADER_BG))
-		.block(Block::default().borders(Borders::ALL).title(" CE-TUI Scanner "));
+		.block(Block::default().borders(Borders::ALL).title(" Memory Scanner "));
 	f.render_widget(bar, area);
 }
 
