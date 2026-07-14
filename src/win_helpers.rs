@@ -4,7 +4,7 @@ use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessIm
 use std::mem::MaybeUninit;
 use std::os::windows::io::{AsHandle, OwnedHandle};
 use std::os::windows::prelude::FromRawHandle;
-use std::ptr::null;
+use std::ptr::{null, read_unaligned};
 use std::{ptr, ptr::null_mut};
 
 #[derive(PartialEq)]
@@ -77,7 +77,7 @@ pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePath
 		return Err(InvalidUtf16ImagePath);
 	}
 
-	let unicode_str = unsafe { &*(buffer.as_ptr() as *const UnicodeString) };
+	let unicode_str = unsafe { read_unaligned(buffer.as_ptr() as *const UnicodeString) };
 	let char_len = unicode_str.length as usize / 2;
 	let start_idx = unicode_struct_size / 2;
 
