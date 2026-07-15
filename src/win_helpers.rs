@@ -2,9 +2,9 @@ use crate::externs::*;
 use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
 use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessImagePathError};
 use std::mem::MaybeUninit;
-use std::os::windows::io::OwnedHandle;
+use std::os::windows::io::{AsHandle, OwnedHandle};
 use std::os::windows::prelude::FromRawHandle;
-use std::ptr::null;
+use std::ptr::{null, read_unaligned};
 use std::{ptr, ptr::null_mut};
 
 #[derive(PartialEq)]
@@ -67,14 +67,25 @@ pub fn write_generic<T: Sized>(handle: Handle, address: *const u8, value: T) -> 
 
 pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePathError> {
 	let mut buffer = vec![0u16; 1024];
-	let size = unsafe {
-		query_full_process_image_name(
-			handle,
-			&mut buffer[..]
-		).map_err(ProcessImagePathError::Unknown)?
-	};
+	let bytes_written = unsafe {
+		query_full_process_image_name(handle, &mut buffer[..])
+			.map_err(ProcessImagePathError::Unknown)?
+	} as usize;
 
-	String::from_utf16(&buffer[0..size as usize])
+	let unicode_struct_size = size_of::<UnicodeString>();
+	if bytes_written < unicode_struct_size {
+		return Err(InvalidUtf16ImagePath);
+	}
+
+	let unicode_str = unsafe { read_unaligned(buffer.as_ptr() as *const UnicodeString) };
+	let char_len = unicode_str.length as usize / 2;
+	let start_idx = unicode_struct_size / 2;
+
+	if start_idx + char_len > buffer.len() {
+		return Err(InvalidUtf16ImagePath);
+	}
+
+	String::from_utf16(&buffer[start_idx..start_idx + char_len])
 		.map_err(|_| InvalidUtf16ImagePath)
 }
 
@@ -144,7 +155,7 @@ pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
 	tp.privileges[0].attributes = SE_PRIVILEGE_ENABLED;
 
 	adjust_token_privileges(
-		guard.into(),
+		guard.as_handle().into(),
 		false,
 		Some(&tp),
 		size_of::<TokenPrivileges>() as _,

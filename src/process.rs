@@ -241,3 +241,11 @@ impl TryFrom<Hwnd> for Process {
 		}
 	}
 }
+
+impl Drop for Process {
+	fn drop(&mut self) {
+		if !self.handle.is_invalid() {
+			unsafe { let _ = NtClose(self.handle); }
+		}
+	}
+}
