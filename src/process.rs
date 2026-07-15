@@ -2,6 +2,7 @@ use crate::errors::{MemoryReadError, MemoryWriteError, ProcessError, ProcessOper
 use crate::mem2disk::BlockDescriptor;
 use crate::win_helpers::{get_process_image_path, read_bytes, write_bytes};
 use std::convert::TryFrom;
+use std::mem::MaybeUninit;
 use crate::utils::Pid;
 use crate::externs::*;
 use crate::externs::IntoResult;
@@ -165,22 +166,24 @@ impl Process {
 	#[inline]
 	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
 		let mut buffer = Vec::with_capacity(block_descriptor.size);
-		self.get_chunk_into(block_descriptor, &mut buffer)
-			.map(|_| buffer)
+		let spare = buffer.spare_capacity_mut();
+		self.get_chunk_into(block_descriptor, spare).map(|x| {
+			unsafe { buffer.set_len(x); }
+			buffer
+		})
 	}
 
-	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut [u8]) -> Result<usize, MemoryReadError> {
+	pub fn get_chunk_into(&self, block_descriptor: &BlockDescriptor, buffer: &mut [MaybeUninit<u8>]) -> Result<usize, MemoryReadError> {
 		debug_assert!(!self.handle.is_invalid());
 		debug_assert!(buffer.len() >= block_descriptor.size);
 
 		let read_count = read_bytes(
 			self.handle,
 			block_descriptor.virtual_address as _,
-			buffer.as_mut_ptr(),
+			buffer.as_mut_ptr() as _,
 			block_descriptor.size
 		)?;
 
-		//unsafe { buffer.set_len(read_count) };
 		Ok(read_count)
 	}
 

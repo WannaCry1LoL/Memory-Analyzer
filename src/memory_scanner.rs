@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+use std::slice;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
 use crate::errors::MemoryScanError;
@@ -212,8 +214,7 @@ impl MemoryScanner {
 		}
 
 		let mut main_buffer = Vec::<u8>::with_capacity(capacity);
-		unsafe { main_buffer.set_len(capacity); }
-		let mut remaining_buf = main_buffer.as_mut_slice(); // dont care since its u8
+		let mut remaining_buf = main_buffer.spare_capacity_mut();
 		let mut chunk_slices = Vec::with_capacity(blocks.len());
 
 		for block in &blocks {
@@ -227,7 +228,7 @@ impl MemoryScanner {
 			.zip(chunk_slices)
 			.filter_map(|(desc, buf)| {
 				let read = process.get_chunk_into(desc, buf).ok()?;
-				let mem = &buf[..read];
+				let mem = unsafe { buf[..read].assume_init_ref() };
 
 				let mask = request.run(mem, alignment);
 				let ones = mask.count_ones();
@@ -276,8 +277,7 @@ impl MemoryScanner {
 		}
 
 		let mut main_buffer = Vec::<u8>::with_capacity(capacity);
-		unsafe { main_buffer.set_len(capacity); }
-		let mut remaining_buf = main_buffer.as_mut_slice(); // dont care since it's u8
+		let mut remaining_buf = main_buffer.spare_capacity_mut();
 		let mut chunk_slices = Vec::with_capacity(state.blocks.len());
 
 		for block in &state.blocks {
@@ -302,7 +302,7 @@ impl MemoryScanner {
 				let desc = BlockDescriptor::new(block.base_address, read_size);
 
 				let read = process.get_chunk_into(&desc, buf).ok()?;
-				let mem = &buf[..read];
+				let mem = unsafe { buf[..read].assume_init_ref() };
 
 				let mut new_mask = MatchMask::repeat(false, mask_len);
 
