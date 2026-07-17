@@ -13,7 +13,6 @@ mod simd_types;
 mod ui;
 mod ui_types;
 mod utils;
-mod win_helpers;
 
 #[cfg(not(all(
 	target_pointer_width = "64",
@@ -40,7 +39,7 @@ use ratatui::Terminal;
 use ui::{draw, App};
 use ui_types::{FieldTarget, Focus, InputMode, Screen};
 
-use crate::win_helpers::enable_debug_privilege;
+use crate::externs::enable_debug_privilege;
 
 fn main() -> io::Result<()> {
 	enable_debug_privilege().expect("Process must be run as administrator");

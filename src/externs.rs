@@ -1,10 +1,9 @@
 use core::ffi::c_void;
-use std::os::windows::io::{
-	AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle,
-};
-use std::ptr::{from_ref, from_mut, null, null_mut};
-
-use crate::utils::Pid;
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+use std::ptr::{self, from_ref, from_mut, null, null_mut};
+use std::mem::MaybeUninit;
+use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError};
+use crate::utils::EnumerationState;
 
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -18,6 +17,11 @@ pub enum NtStatusType {
 pub trait IntoResult: Sized {
 	fn into_result(self) -> Result<(), Self>;
 }
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Pid(pub u32);
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Handle(pub *mut c_void);
@@ -46,6 +50,8 @@ unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 unsafe impl Send for Hwnd {}
 unsafe impl Sync for Hwnd {}
+unsafe impl Send for Pid {}
+unsafe impl Sync for Pid {}
 
 impl AsRawHandle for Handle {
 	fn as_raw_handle(&self) -> RawHandle {
@@ -87,6 +93,26 @@ impl IntoResult for Win32Error {
 	fn into_result(self) -> Result<(), Self> {
 		if self.is_ok() { Ok(()) } else { Err(self) }
 	}
+}
+
+macro_rules! impl_fmt_forward {
+    ($ty:ty => $($trait:path),+ $(,)?) => {
+        $(
+            impl $trait for $ty {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+            }
+        )+
+    };
+}
+
+impl_fmt_forward!(Pid => std::fmt::Display, std::fmt::UpperHex);
+
+impl From<u32> for Pid {
+	fn from(pid: u32) -> Self { Self(pid) }
+}
+
+impl From<Pid> for u32 {
+	fn from(pid: Pid) -> Self { pid.0 }
 }
 
 impl Handle {
@@ -439,7 +465,7 @@ pub fn virtual_query_ex(
 	}
 }
 
-pub unsafe fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> {
+pub fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> {
 	let mut pbi = ProcessBasicInformation::default();
 	let mut return_length = 0;
 
@@ -476,7 +502,7 @@ pub unsafe fn query_full_process_image_name(
 	}
 }
 
-pub unsafe fn get_system_info() -> Result<SystemBasicInformation, NtStatus> {
+pub fn get_system_info() -> Result<SystemBasicInformation, NtStatus> {
 	let mut sbi = SystemBasicInformation::default();
 	let mut return_length = 0;
 	unsafe {
@@ -490,6 +516,159 @@ pub unsafe fn get_system_info() -> Result<SystemBasicInformation, NtStatus> {
 		.map(|_| sbi)
 	}
 }
+
+pub fn enum_proc_info<T>(
+	mut callback: impl FnMut(&SystemBasicProcessInformation) -> EnumerationState<T>,
+) -> Option<T> {
+	unsafe {
+		let mut bytes: u32 = 0;
+		let mut bytes_written: u32 = 0;
+
+		if NtQuerySystemInformation(
+			SystemInformationClass::SYSTEM_BASIC_PROCESS_INFORMATION,
+			null_mut(),
+			0,
+			&mut bytes,
+		) != NtStatus::STATUS_INFO_LENGTH_MISMATCH {
+			return None;
+		}
+
+		let mut sys_info = vec![0u8; bytes as usize];
+		let mut base_ptr = sys_info.as_ptr();
+
+		if NtQuerySystemInformation(
+			SystemInformationClass::SYSTEM_BASIC_PROCESS_INFORMATION,
+			sys_info.as_mut_ptr() as _,
+			bytes,
+			&mut bytes_written,
+		).is_ok() {
+			let mut current_sys_info: SystemBasicProcessInformation;
+
+			loop {
+				let ptr = base_ptr as *const SystemBasicProcessInformation;
+				current_sys_info = ptr::read_unaligned(ptr);
+
+				match callback(&current_sys_info) {
+					EnumerationState::Return(value) => return Some(value),
+					EnumerationState::Continue => {}
+					EnumerationState::Break => break,
+				}
+
+				if current_sys_info.next_entry_offset == 0 { break; }
+				base_ptr = base_ptr.add(current_sys_info.next_entry_offset as _);
+			}
+		}
+	}
+
+	None
+}
+
+pub fn read_bytes(
+	handle: Handle,
+	address: *const u8,
+	buffer: *mut u8,
+	len: usize,
+) -> Result<usize, MemoryReadError> {
+	let mut read_bytes: usize = 0;
+
+	let status = unsafe { NtReadVirtualMemory(
+		handle,
+		address as _,
+		buffer as _,
+		len,
+		&mut read_bytes,
+	) };
+
+	if read_bytes == 0 {
+		return status
+			.into_result()
+			.map_err(MemoryReadError::Other)
+			.map(|_| 0);
+	}
+
+	Ok(read_bytes)
+}
+
+pub fn write_bytes(
+	handle: Handle,
+	address: *const u8,
+	buffer: *const u8,
+	len: usize,
+) -> Result<(), MemoryWriteError> {
+	let mut written_bytes: usize = 0;
+
+	let status = unsafe { NtWriteVirtualMemory(
+		handle,
+		address as _,
+		buffer as _,
+		len,
+		&mut written_bytes,
+	) };
+
+	if written_bytes != len {
+		return Err(MemoryWriteError::NotEnoughBytesWritten);
+	}
+
+	status.into_result().map_err(MemoryWriteError::Other)
+}
+
+pub fn read_generic<T: Sized>(handle: Handle, address: *const u8) -> Result<T, MemoryReadError> {
+	let mut mem = MaybeUninit::<T>::uninit();
+	let res = read_bytes(handle, address, mem.as_mut_ptr() as _, size_of::<T>());
+	let read = res?;
+	if read != size_of::<T>() {
+		return Err(MemoryReadError::NotEnoughBytesRead);
+	}
+	Ok(unsafe { mem.assume_init() })
+}
+
+pub fn write_generic<T: Sized>(
+	handle: Handle,
+	address: *const u8,
+	value: T,
+) -> Result<(), MemoryWriteError> {
+	let ptr = &raw const value;
+	let res = write_bytes(handle, address, ptr as _, size_of::<T>());
+	res?;
+	Ok(())
+}
+
+pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
+	let token = open_process_token(
+		Handle::CURRENT_PROCESS,
+		TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+	)
+		.map_err(|_| ElevationError::Unknown)?;
+
+	let guard = OwnedHandle::from_raw_handle(token.0);
+
+	let mut luid = Luid::default();
+	let priv_name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
+
+	if LookupPrivilegeValueW(null(), priv_name.as_ptr(), &mut luid) == 0 {
+		return Err(ElevationError::PrivilegeLookupFailed)
+	};
+
+	let mut tp = TokenPrivileges::default();
+	tp.privilege_count = 1;
+	tp.privileges[0].luid = luid;
+	tp.privileges[0].attributes = SE_PRIVILEGE_ENABLED;
+
+	adjust_token_privileges(
+		guard.as_handle().into(),
+		false,
+		Some(&tp),
+		size_of::<TokenPrivileges>() as _,
+		None,
+		None,
+	)
+		.map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
+
+	match RtlGetLastWin32Error() {
+		Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),
+		_ => Ok(())
+	}
+} }
 
 #[link(name = "user32")]
 unsafe extern "system" {

@@ -1,62 +1,20 @@
 use std::collections::HashMap;
-
+use std::ptr::read_unaligned;
 use bitvec::vec::BitVec;
 
 use crate::utils::TriState::{DontCare, False, True};
-use crate::win_helpers::{enum_proc_info, EnumerationState};
+use crate::externs::{enum_proc_info, query_full_process_image_name, Handle, Pid, UnicodeString};
 
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
 
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Default)]
-pub struct Pid(pub u32);
-
-unsafe impl Send for Pid {}
-unsafe impl Sync for Pid {}
-
-macro_rules! impl_fmt_forward {
-    ($ty:ty => $($trait:path),+ $(,)?) => {
-        $(
-            impl $trait for $ty {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
-            }
-        )+
-    };
+#[derive(Debug, PartialEq)]
+pub enum EnumerationState<T> {
+	Continue,
+	Break,
+	Return(T),
 }
 
-impl_fmt_forward!(Pid => std::fmt::Display, std::fmt::UpperHex);
-
-impl From<u32> for Pid {
-	fn from(pid: u32) -> Self { Self(pid) }
-}
-
-impl From<Pid> for u32 {
-	fn from(pid: Pid) -> Self { pid.0 }
-}
-
-pub fn build_process_tree() -> HashMap<usize, Vec<usize>> {
-	let mut ret: HashMap<usize, Vec<usize>> = HashMap::new();
-	enum_proc_info(|info| {
-		let ppid = info.inherited_from_unique_process_id;
-		let pid = info.unique_process_id;
-		ret.entry(ppid).or_default().push(pid);
-
-		EnumerationState::<()>::Continue
-	});
-	ret
-}
-
-pub fn find_proc_from_image_name(name: &str) -> Option<usize> {
-	enum_proc_info(|info| {
-		if !info.image_name.buffer.is_null()
-			&& let res = info.image_name.to_string()
-			&& res == name
-		{ EnumerationState::Return(info.unique_process_id) } 
-		else { EnumerationState::Continue }
-	})
-}
-
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TriState {
 	False = 0,
 	True = 1,
@@ -95,6 +53,53 @@ impl TriState {
 impl From<bool> for TriState {
 	fn from(v: bool) -> TriState { if v { True } else { False } }
 }
+
+pub fn build_process_tree() -> HashMap<Pid, Vec<Pid>> {
+	let mut ret: HashMap<Pid, Vec<Pid>> = HashMap::new();
+	enum_proc_info(|info| {
+		let ppid = info.inherited_from_unique_process_id as u32;
+		let pid = info.unique_process_id as u32;
+		ret.entry(ppid.into()).or_default().push(pid.into());
+
+		EnumerationState::<()>::Continue
+	});
+	ret
+}
+
+pub fn find_proc_from_image_name(name: &str) -> Option<Pid> {
+	enum_proc_info(|info| {
+		if !info.image_name.buffer.is_null()
+			&& let res = info.image_name.to_string()
+			&& res == name
+		{ EnumerationState::Return((info.unique_process_id as u32).into()) }
+		else { EnumerationState::Continue }
+	})
+}
+
+pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePathError> {
+	let mut buffer = vec![0u16; 1024];
+	let bytes_written = unsafe {
+		query_full_process_image_name(handle, &mut buffer[..])
+			.map_err(ProcessImagePathError::Unknown)?
+	} as usize;
+
+	let unicode_struct_size = size_of::<UnicodeString>();
+	if bytes_written < unicode_struct_size {
+		return Err(InvalidUtf16ImagePath);
+	}
+
+	let unicode_str = unsafe { read_unaligned(buffer.as_ptr() as *const UnicodeString) };
+	let char_len = unicode_str.length as usize / 2;
+	let start_idx = unicode_struct_size / 2;
+
+	if start_idx + char_len > buffer.len() {
+		return Err(InvalidUtf16ImagePath);
+	}
+
+	String::from_utf16(&buffer[start_idx..start_idx + char_len])
+		.map_err(|_| InvalidUtf16ImagePath)
+}
+
 
 pub fn string_to_bytes_radix(s: &str, radix: Option<u32>) -> Result<Vec<u8>, ()> {
 	let radix = radix.unwrap_or(10);
@@ -147,3 +152,5 @@ macro_rules! get {
 }
 
 pub(crate) use get;
+use crate::errors::ProcessImagePathError;
+use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;

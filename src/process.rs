@@ -2,10 +2,9 @@ use std::convert::TryFrom;
 use std::mem::MaybeUninit;
 
 use crate::errors::{MemoryReadError, MemoryWriteError, ProcessError, ProcessOperationError};
-use crate::externs::{IntoResult, *};
+use crate::externs::*;
 use crate::mem2disk::BlockDescriptor;
-use crate::utils::Pid;
-use crate::win_helpers::{get_process_image_path, read_bytes, write_bytes};
+use crate::utils::get_process_image_path;
 
 struct WindowSearchState {
 	found_windows: Vec<Hwnd>,
