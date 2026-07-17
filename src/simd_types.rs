@@ -1,7 +1,12 @@
 use std::mem::size_of;
 use std::simd::Simd;
 
-pub const SIMD_REGISTER_WIDTH: usize = if cfg!(target_feature = "avx512f") { 64 } else { 32 };
+pub const SIMD_REGISTER_WIDTH: usize = if cfg!(target_feature = "avx512f") {
+	64
+} else {
+	32
+};
+
 pub const SIMD_REGISTER_WIDTH_BITS: usize = SIMD_REGISTER_WIDTH * 8;
 
 pub trait ToSimd: Copy {

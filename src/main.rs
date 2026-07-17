@@ -2,43 +2,44 @@
 #![feature(associated_type_defaults)]
 extern crate core;
 
-mod utils;
-mod matches;
-mod win_helpers;
-mod process;
-mod memory_scanner;
 mod errors;
-mod num_helpers;
+mod externs;
+mod matches;
 mod mem2disk;
+mod memory_scanner;
+mod num_helpers;
+mod process;
 mod simd_types;
 mod ui;
 mod ui_types;
-mod externs;
+mod utils;
+mod win_helpers;
 
 #[cfg(not(all(
 	target_pointer_width = "64",
 	target_os = "windows",
 	target_feature = "bmi2",
-	any(
-		target_feature = "avx2",
-		target_feature = "avx512f",
-	)
+	any(target_feature = "avx2", target_feature = "avx512f",)
 )))]
-compile_error!("This project requires windows 11 version >= 26100.4770 and a 64-Bit CPU with the following features: BMI2, AVX2 or AVX512F");
+compile_error!(
+	"This project requires windows 11 version >= 26100.4770 and a 64-Bit CPU with the following features: BMI2, AVX2 or AVX512F"
+);
 
-use std::io;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::time::{Duration, Instant};
 
-use crossterm::{
-	event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
-	execute,
-	terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+use crossterm::event::{
+	self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
-
+use crossterm::execute;
+use crossterm::terminal::{
+	disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use ui::{draw, App};
 use ui_types::{FieldTarget, Focus, InputMode, Screen};
+
 use crate::win_helpers::enable_debug_privilege;
 
 fn main() -> io::Result<()> {
@@ -54,16 +55,19 @@ fn main() -> io::Result<()> {
 
 	disable_raw_mode()?;
 	execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+		terminal.backend_mut(),
+		LeaveAlternateScreen,
+		DisableMouseCapture
+	)?;
 	terminal.show_cursor()?;
 
 	result
 }
 
-fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+fn run_app<B: ratatui::backend::Backend>(
+	terminal: &mut Terminal<B>,
+	app: &mut App,
+) -> io::Result<()> {
 	let tick_rate = Duration::from_millis(250);
 	let mut last_tick = Instant::now();
 
@@ -152,13 +156,41 @@ fn handle_key_process_select(app: &mut App, code: KeyCode) {
 
 fn handle_key_scanner(app: &mut App, code: KeyCode) {
 	match app.focus {
-		Focus::ValueInput => if code == KeyCode::Enter {  app.start_edit(FieldTarget::Value) }
-		Focus::ValueInput2 => if code == KeyCode::Enter { app.start_edit(FieldTarget::Value2) }
-		Focus::Alignment => if code == KeyCode::Enter { app.start_edit(FieldTarget::Alignment) }
-		Focus::RangeStart => if code == KeyCode::Enter { app.start_edit(FieldTarget::RangeStart) }
-		Focus::RangeEnd => if code == KeyCode::Enter { app.start_edit(FieldTarget::RangeEnd) }
-		Focus::ScanBtn => if code == KeyCode::Enter { app.trigger_scan() }
-		Focus::NextScanBtn => if code == KeyCode::Enter { app.trigger_next_scan() }
+		Focus::ValueInput => {
+			if code == KeyCode::Enter {
+				app.start_edit(FieldTarget::Value)
+			}
+		}
+		Focus::ValueInput2 => {
+			if code == KeyCode::Enter {
+				app.start_edit(FieldTarget::Value2)
+			}
+		}
+		Focus::Alignment => {
+			if code == KeyCode::Enter {
+				app.start_edit(FieldTarget::Alignment)
+			}
+		}
+		Focus::RangeStart => {
+			if code == KeyCode::Enter {
+				app.start_edit(FieldTarget::RangeStart)
+			}
+		}
+		Focus::RangeEnd => {
+			if code == KeyCode::Enter {
+				app.start_edit(FieldTarget::RangeEnd)
+			}
+		}
+		Focus::ScanBtn => {
+			if code == KeyCode::Enter {
+				app.trigger_scan()
+			}
+		}
+		Focus::NextScanBtn => {
+			if code == KeyCode::Enter {
+				app.trigger_next_scan()
+			}
+		}
 		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => match code {
 			KeyCode::Enter | KeyCode::Char(' ') => app.cycle_focused_tristate(false),
 			KeyCode::Left => app.cycle_focused_tristate(true),
@@ -171,7 +203,9 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			_ => {}
 		},
 		Focus::FreezeProcess => match code {
-			KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Right => app.freeze_process = !app.freeze_process,
+			KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Right => {
+				app.freeze_process = !app.freeze_process
+			}
 			_ => {}
 		},
 		Focus::ResultsList => match code {
@@ -188,6 +222,6 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			KeyCode::Char('r') => app.start_edit(FieldTarget::SavedDescription),
 			KeyCode::Char('d') | KeyCode::Delete => app.remove_selected_saved(),
 			_ => {}
-		}
+		},
 	}
 }

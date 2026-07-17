@@ -1,14 +1,15 @@
-use crate::simd_types::ToSimd;
-use crate::utils::MatchMask;
-use bitvec::order::Lsb0;
-use bitvec::view::BitView;
-use num_traits::Float;
 use std::cmp::Ordering;
 use std::ptr::read_unaligned;
 use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
 use std::simd::num::SimdFloat;
 use std::simd::prelude::*;
-use crate::utils::get;
+
+use bitvec::order::Lsb0;
+use bitvec::view::BitView;
+use num_traits::Float;
+
+use crate::simd_types::ToSimd;
+use crate::utils::{get, MatchMask};
 
 pub trait FromU128 {
 	fn from_u128(x: u128) -> Self;
@@ -58,24 +59,24 @@ pub enum ScanCondition<T: Scannable> {
 	/// Checks if the value is >= lower or <= upper
 	WrappingRange(T, T),
 	/// Checks for fuzzy equality (if relevant)
-	FuzzyEq(T, T)
+	FuzzyEq(T, T),
 }
 
-impl<T> ScanCondition<T> where T : Scannable {
-	pub	fn default_alignment(&self) -> usize {
+impl<T: Scannable> ScanCondition<T> {
+	pub const fn default_alignment(&self) -> usize {
 		<T as Scannable>::DEFAULT_ALIGNMENT
 	}
 
-	pub fn from_greater_than(value: T) -> Self {
+	pub const fn from_greater_than(value: T) -> Self {
 		Self::Range(value, T::MAX)
 	}
 
-	pub fn from_less_than(value: T) -> Self {
+	pub const fn from_less_than(value: T) -> Self {
 		Self::Range(T::MIN, value)
 	}
 }
 
-impl<T> ScanCondition<T> where T : Scannable + FromU128 {
+impl<T: Scannable + FromU128> ScanCondition<T> {
 	pub fn from_logical_range(lo: i128, hi: i128) -> ScanCondition<T> {
 		let bits: usize = <T as ToSimd>::SIZE * 8;
 
@@ -89,14 +90,14 @@ impl<T> ScanCondition<T> where T : Scannable + FromU128 {
 		let thing_hi: T = T::from_u128(clamped_hi);
 
 		match clamped_lo.cmp(&clamped_hi) {
-			Ordering::Equal   => ScanCondition::Eq(thing_lo),
-			Ordering::Less    => ScanCondition::Range(thing_lo, thing_hi),
+			Ordering::Equal => ScanCondition::Eq(thing_lo),
+			Ordering::Less => ScanCondition::Range(thing_lo, thing_hi),
 			Ordering::Greater => ScanCondition::WrappingRange(thing_lo, thing_hi),
 		}
 	}
 }
 
-pub trait Scannable : PartialEq + PartialOrd + ToSimd + 'static {
+pub trait Scannable: PartialEq + PartialOrd + ToSimd + 'static {
 	type Vector = <Self as ToSimd>::SimdType;
 	const DEFAULT_ALIGNMENT: usize = size_of::<Self>();
 	const MAX: Self;
@@ -106,10 +107,12 @@ pub trait Scannable : PartialEq + PartialOrd + ToSimd + 'static {
 		let ptr = bytes.as_ptr() as _;
 		unsafe { read_unaligned(ptr) }
 	}
+
 	fn from_bytes(bytes: &[u8]) -> Self {
 		let ptr = bytes.as_ptr() as _;
 		unsafe { read_unaligned(ptr) }
 	}
+
 	fn eval(cond: &ScanCondition<Self>, value: Self::Vector) -> u64;
 	fn matches(cond: &ScanCondition<Self>, value: Self) -> bool {
 		match *cond {
@@ -117,7 +120,7 @@ pub trait Scannable : PartialEq + PartialOrd + ToSimd + 'static {
 			ScanCondition::NotEq(n) => value != n,
 			ScanCondition::Range(lo, hi) => value >= lo && value <= hi,
 			ScanCondition::WrappingRange(lo, hi) => value >= lo || value <= hi,
-			ScanCondition::FuzzyEq(n, _) => value == n
+			ScanCondition::FuzzyEq(n, _) => value == n,
 		}
 	}
 }
@@ -132,7 +135,7 @@ fn spacing_mask(ratio: usize) -> u64 {
 }
 
 pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize) -> MatchMask {
-	use core::arch::x86_64::{ _pext_u64, _pdep_u64 };
+	use core::arch::x86_64::{_pdep_u64, _pext_u64};
 
 	let elem_size = T::SIZE;
 	let reg_width = size_of::<T::Vector>();
@@ -148,7 +151,7 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 
 	if alignment == elem_size {
 		while i + reg_width <= bytes.len() {
-			let chunk = get!(bytes, i.. i + reg_width);
+			let chunk = get!(bytes, i, reg_width);
 			let v = T::load(chunk);
 			let mask = T::eval(&cond, v);
 			let view = &mask.view_bits::<Lsb0>()[..T::LANES];
@@ -160,7 +163,7 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 		let ratio = alignment / elem_size;
 		let extract_mask = spacing_mask(ratio);
 		while i + reg_width <= bytes.len() {
-			let chunk = get!(bytes, i.. i + reg_width);
+			let chunk = get!(bytes, i, reg_width);
 			let v = T::load(chunk);
 			let mask = T::eval(&cond, v);
 			let compressed = unsafe { _pext_u64(mask, extract_mask) };
@@ -175,7 +178,7 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 		while i + reg_width + elem_size - 1 <= bytes.len() {
 			let mut chunk_mask = 0u64;
 			for offset in (0..elem_size).step_by(alignment) {
-				let chunk = get!(bytes, i + offset .. i + offset + reg_width);
+				let chunk = get!(bytes, i + offset, reg_width);
 				let v = T::load(chunk);
 				let bitmask = T::eval(&cond, v);
 				let spaced_bits = unsafe { _pdep_u64(bitmask, deposit_mask) };
@@ -190,7 +193,7 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 	let mut rem_i = i.div_ceil(alignment) * alignment;
 
 	while rem_i + elem_size <= bytes.len() {
-		let value = T::from_bytes(get!(bytes, rem_i .. rem_i + elem_size));
+		let value = T::from_bytes(get!(bytes, rem_i, elem_size));
 		res2.push(T::matches(&cond, value));
 		rem_i += alignment;
 	}
@@ -323,7 +326,7 @@ impl ArrayByteExt for [u8] {
 		let b_msb_flipped = b[0] ^ 0x80;
 
 		match a_msb_flipped.cmp(&b_msb_flipped) {
-			Ordering::Equal => get!(self, 1..).cmp(get!(&b, 1..)),
+			Ordering::Equal => get!(self, 1..).cmp(get!(b, 1..)),
 			other => other,
 		}
 	}
@@ -337,7 +340,7 @@ impl ArrayByteExt for [u8] {
 		let b_msb_flipped = get!(b, n - 1) ^ 0x80;
 
 		match a_msb_flipped.cmp(&b_msb_flipped) {
-			Ordering::Equal => get!(self, ..n - 1).cmp_le(get!(&b, ..n - 1)),
+			Ordering::Equal => get!(self, ..n - 1).cmp_le(get!(b, ..n - 1)),
 			other => other,
 		}
 	}
@@ -345,19 +348,22 @@ impl ArrayByteExt for [u8] {
 	fn cmp_le(&self, b: &[u8]) -> Ordering {
 		debug_assert_eq!(self.len(), b.len());
 		let n = self.len();
-		if n == 0 { return Ordering::Equal; }
+		if n == 0 {
+			return Ordering::Equal;
+		}
 
 		let mut i = n;
 
 		while i >= 64 {
 			i -= 64;
-			let val_a = u8x64::from_slice(get!(&self, i..i + 64));
-			let val_b = u8x64::from_slice(get!(&b, i..i + 64));
+			let val_a = u8x64::from_slice(get!(self, i, 64));
+			let val_b = u8x64::from_slice(get!(b, i, 64));
 
 			if val_a != val_b {
 				let bitmask = val_a.simd_ne(val_b).to_bitmask();
 				let highest_differing_lane = 63 - bitmask.leading_zeros() as usize;
-				return get!(self, i + highest_differing_lane).cmp(get!(&b, i + highest_differing_lane));
+				return get!(self, i + highest_differing_lane)
+					.cmp(get!(b, i + highest_differing_lane));
 			}
 		}
 
@@ -394,7 +400,7 @@ impl ArrayScanExt for [u8] {
 		candidates
 			.clone()
 			.iter_ones()
-			.filter(|&i| get!(self, i..i+n) != needle)
+			.filter(|&i| get!(self, i, n) != needle)
 			.for_each(|i| candidates.set(i, false));
 
 		candidates

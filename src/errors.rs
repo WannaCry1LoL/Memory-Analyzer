@@ -21,7 +21,7 @@ pub enum ProcessOperationError {
 	/// Suspend failed because the own process may not be suspended
 	CannotSuspendSelf,
 	SuspendFailed(NtStatus),
-	ResumeFailed(NtStatus)
+	ResumeFailed(NtStatus),
 }
 
 #[derive(Debug)]
@@ -69,5 +69,5 @@ pub enum ElevationError {
 	PrivilegeNotAssigned,
 	/// NtAdjustPrivilegesToken returned a non-success ntstatus
 	PrivilegeAdjustmentFailed,
-	Unknown
+	Unknown,
 }

@@ -8,7 +8,7 @@ pub enum Screen {
 pub enum RoundingMode {
 	Truncate,
 	Default,
-	Extreme
+	Extreme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +115,7 @@ impl RoundingMode {
 	pub const ALL: [RoundingMode; 3] = [
 		RoundingMode::Default,
 		RoundingMode::Extreme,
-		RoundingMode::Truncate
+		RoundingMode::Truncate,
 	];
 
 	pub fn label(self) -> &'static str {
@@ -139,7 +139,7 @@ pub enum ScanMode {
 	ExactValue,
 	BiggerThan,
 	SmallerThan,
-	ValueBetween
+	ValueBetween,
 }
 
 impl ScanMode {
@@ -147,7 +147,7 @@ impl ScanMode {
 		ScanMode::ExactValue,
 		ScanMode::BiggerThan,
 		ScanMode::SmallerThan,
-		ScanMode::ValueBetween
+		ScanMode::ValueBetween,
 	];
 
 	pub fn label(self) -> &'static str {
@@ -155,15 +155,18 @@ impl ScanMode {
 			ScanMode::ExactValue => "Exact Value",
 			ScanMode::BiggerThan => "Bigger than",
 			ScanMode::SmallerThan => "Smaller than",
-			ScanMode::ValueBetween => "Value between"
+			ScanMode::ValueBetween => "Value between",
 		}
 	}
 
 	pub fn needs_value(self) -> bool {
 		matches!(
-            self,
-            ScanMode::ExactValue | ScanMode::BiggerThan | ScanMode::SmallerThan | ScanMode::ValueBetween
-        )
+			self,
+			ScanMode::ExactValue
+				| ScanMode::BiggerThan
+				| ScanMode::SmallerThan
+				| ScanMode::ValueBetween
+		)
 	}
 
 	pub fn needs_second_value(self) -> bool {

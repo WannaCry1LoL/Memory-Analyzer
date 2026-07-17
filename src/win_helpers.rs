@@ -1,20 +1,25 @@
-use crate::externs::*;
-use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
-use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessImagePathError};
 use std::mem::MaybeUninit;
 use std::os::windows::io::{AsHandle, OwnedHandle};
 use std::os::windows::prelude::FromRawHandle;
-use std::ptr::{null, read_unaligned};
-use std::{ptr, ptr::null_mut};
+use std::ptr::{self, null, null_mut, read_unaligned};
+
+use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
+use crate::errors::{ElevationError, MemoryReadError, MemoryWriteError, ProcessImagePathError};
+use crate::externs::*;
 
 #[derive(PartialEq)]
 pub enum EnumerationState<T> {
 	Continue,
 	Break,
-	Return(T)
+	Return(T),
 }
 
-pub fn read_bytes(handle: Handle, address: *const u8, buffer: *mut u8, len: usize) -> Result<usize, MemoryReadError> {
+pub fn read_bytes(
+	handle: Handle,
+	address: *const u8,
+	buffer: *mut u8,
+	len: usize,
+) -> Result<usize, MemoryReadError> {
 	let mut read_bytes: usize = 0;
 	let status = unsafe { NtReadVirtualMemory(
 		handle,
@@ -25,13 +30,21 @@ pub fn read_bytes(handle: Handle, address: *const u8, buffer: *mut u8, len: usiz
 	) };
 
 	if read_bytes == 0 {
-		return status.into_result().map_err(MemoryReadError::Other).map(|_| 0);
+		return status
+			.into_result()
+			.map_err(MemoryReadError::Other)
+			.map(|_| 0);
 	}
 
 	Ok(read_bytes)
 }
 
-pub fn write_bytes(handle: Handle, address: *const u8, buffer: *const u8, len: usize) -> Result<(), MemoryWriteError> {
+pub fn write_bytes(
+	handle: Handle,
+	address: *const u8,
+	buffer: *const u8,
+	len: usize,
+) -> Result<(), MemoryWriteError> {
 	let mut written_bytes: usize = 0;
 	let status = unsafe { NtWriteVirtualMemory(
 		handle,
@@ -42,7 +55,7 @@ pub fn write_bytes(handle: Handle, address: *const u8, buffer: *const u8, len: u
 	) };
 
 	if written_bytes != len {
-		return Err(MemoryWriteError::NotEnoughBytesWritten)
+		return Err(MemoryWriteError::NotEnoughBytesWritten);
 	}
 
 	status.into_result().map_err(MemoryWriteError::Other)
@@ -58,7 +71,11 @@ pub fn read_generic<T: Sized>(handle: Handle, address: *const u8) -> Result<T, M
 	Ok(unsafe { mem.assume_init() })
 }
 
-pub fn write_generic<T: Sized>(handle: Handle, address: *const u8, value: T) -> Result<(), MemoryWriteError> {
+pub fn write_generic<T: Sized>(
+	handle: Handle,
+	address: *const u8,
+	value: T,
+) -> Result<(), MemoryWriteError> {
 	let ptr = &raw const value;
 	let res = write_bytes(handle, address, ptr as _, size_of::<T>());
 	res?;
@@ -89,7 +106,9 @@ pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePath
 		.map_err(|_| InvalidUtf16ImagePath)
 }
 
-pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation) -> EnumerationState<T>) -> Option<T> {
+pub fn enum_proc_info<T>(
+	mut callback: impl FnMut(&SystemBasicProcessInformation) -> EnumerationState<T>,
+) -> Option<T> {
 	unsafe {
 		let mut bytes: u32 = 0;
 		let mut bytes_written: u32 = 0;
@@ -110,7 +129,7 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation
 			SystemInformationClass::SYSTEM_BASIC_PROCESS_INFORMATION,
 			sys_info.as_mut_ptr() as _,
 			bytes,
-			&mut bytes_written
+			&mut bytes_written,
 		).is_ok() {
 			let mut current_sys_info: SystemBasicProcessInformation;
 
@@ -120,7 +139,7 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation
 
 				match callback(&current_sys_info) {
 					EnumerationState::Return(value) => return Some(value),
-					EnumerationState::Continue => {},
+					EnumerationState::Continue => {}
 					EnumerationState::Break => break,
 				}
 
@@ -128,7 +147,6 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation
 				base_ptr = base_ptr.add(current_sys_info.next_entry_offset as _);
 			}
 		}
-
 	}
 
 	None
@@ -137,8 +155,9 @@ pub fn enum_proc_info<T>(mut callback: impl FnMut(&SystemBasicProcessInformation
 pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
 	let token = open_process_token(
 		Handle::CURRENT_PROCESS,
-		TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
-	).map_err(|_| ElevationError::Unknown)?;
+		TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+	)
+	.map_err(|_| ElevationError::Unknown)?;
 
 	let guard = OwnedHandle::from_raw_handle(token.0);
 
@@ -160,8 +179,9 @@ pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
 		Some(&tp),
 		size_of::<TokenPrivileges>() as _,
 		None,
-		None
-	).map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
+		None,
+	)
+	.map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
 
 	match RtlGetLastWin32Error() {
 		Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),

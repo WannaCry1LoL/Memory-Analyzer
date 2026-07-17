@@ -1,7 +1,9 @@
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
 use core::ffi::c_void;
-use std::hint::unreachable_unchecked;
-use std::ptr::{null, null_mut};
+use std::os::windows::io::{
+	AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle,
+};
+use std::ptr::{from_ref, from_mut, null, null_mut};
+
 use crate::utils::Pid;
 
 #[repr(u32)]
@@ -10,34 +12,34 @@ pub enum NtStatusType {
 	Success = 0,
 	Information = 1,
 	Warning = 2,
-	Error = 3
+	Error = 3,
 }
 
 pub trait IntoResult: Sized {
 	fn into_result(self) -> Result<(), Self>;
 }
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Handle(pub *mut c_void);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Hwnd(pub isize);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct NtStatus(pub i32);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Win32Error(pub u32);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct PageProtectionFlags(pub u32);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct SystemInformationClass(pub i32);
 
 unsafe impl Send for Handle {}
@@ -52,19 +54,27 @@ impl AsRawHandle for Handle {
 }
 
 impl IntoRawHandle for Handle {
-	fn into_raw_handle(self) -> RawHandle { self.0.cast() }
+	fn into_raw_handle(self) -> RawHandle {
+		self.0.cast()
+	}
 }
 
 impl FromRawHandle for Handle {
-	unsafe fn from_raw_handle(handle: RawHandle) -> Self { Self(handle.cast()) }
+	unsafe fn from_raw_handle(handle: RawHandle) -> Self {
+		Self(handle.cast())
+	}
 }
 
 impl From<OwnedHandle> for Handle {
-	fn from(handle: OwnedHandle) -> Self { Self(handle.into_raw_handle().cast()) }
+	fn from(handle: OwnedHandle) -> Self {
+		Self(handle.into_raw_handle().cast())
+	}
 }
 
 impl<'a> From<BorrowedHandle<'a>> for Handle {
-	fn from(handle: BorrowedHandle<'a>) -> Self { Self(handle.as_raw_handle().cast()) }
+	fn from(handle: BorrowedHandle<'a>) -> Self {
+		Self(handle.as_raw_handle().cast())
+	}
 }
 
 impl IntoResult for NtStatus {
@@ -85,7 +95,9 @@ impl Handle {
 	pub const NULL: Self = Self(null_mut());
 
 	#[inline]
-	pub fn is_invalid(&self) -> bool { self.0.is_null() || self.0 == Self::INVALID.0 }
+	pub fn is_invalid(&self) -> bool {
+		self.0.is_null() || self.0 == Self::INVALID.0
+	}
 }
 
 impl Hwnd {
@@ -102,38 +114,49 @@ impl NtStatus {
 	pub const STATUS_INFO_LENGTH_MISMATCH: Self = Self(0xC0000004_u32 as _);
 	pub const STATUS_ACCESS_DENIED: Self = Self(0xC0000022_u32 as _);
 	pub const STATUS_INVALID_HANDLE: Self = Self(0xC0000008_u32 as _);
+
 	#[inline]
 	pub const fn get_type(&self) -> NtStatusType {
 		match self.0 as u32 >> 30 {
 			0 => NtStatusType::Success,
 			1 => NtStatusType::Information,
 			2 => NtStatusType::Warning,
-			3 => NtStatusType::Error,
-			_ => unsafe { unreachable_unchecked() }
+			_ => NtStatusType::Error
 		}
 	}
 
 	#[inline]
-	pub const fn is_success(&self) -> bool { (self.0 as u32) >> 30 == 0 }
+	pub const fn is_success(&self) -> bool {
+		(self.0 as u32) >> 30 == 0
+	}
 	#[inline]
-	pub const fn is_information(&self) -> bool { (self.0 as u32) >> 30 == 1 }
+	pub const fn is_information(&self) -> bool {
+		(self.0 as u32) >> 30 == 1
+	}
 	#[inline]
-	pub const fn is_warn(&self) -> bool { (self.0 as u32) >> 30 == 2 }
+	pub const fn is_warn(&self) -> bool {
+		(self.0 as u32) >> 30 == 2
+	}
 	#[inline]
-	pub const fn is_error(&self) -> bool { (self.0 as u32) >> 30 == 3 }
+	pub const fn is_error(&self) -> bool {
+		(self.0 as u32) >> 30 == 3
+	}
 	#[inline]
-	pub const fn is_ok(&self) -> bool { self.is_success() }
+	pub const fn is_ok(&self) -> bool {
+		self.is_success()
+	}
 }
-
 
 impl Win32Error {
 	pub const ERROR_ACCESS_DENIED: Win32Error = Win32Error(5);
 	pub const ERROR_INVALID_HANDLE: Win32Error = Win32Error(6);
 	pub const ERROR_NOT_ALL_ASSIGNED: Win32Error = Win32Error(1300);
-	#[inline]
-	pub const fn is_ok(self) -> bool { self.0 == 0 }
-}
 
+	#[inline]
+	pub const fn is_ok(self) -> bool {
+		self.0 == 0
+	}
+}
 
 impl PageProtectionFlags {
 	pub const PAGE_READWRITE: Self = Self(0x04);
@@ -144,12 +167,24 @@ impl PageProtectionFlags {
 	pub const PAGE_EXECUTE_WRITECOPY: Self = Self(0x80);
 
 	pub const MEM_WRITABLE: Self = Self(Self::PAGE_READWRITE.0 | Self::PAGE_EXECUTE_READWRITE.0);
-	pub const MEM_EXECUTABLE: Self = Self(Self::PAGE_EXECUTE.0 | Self::PAGE_EXECUTE_READ.0 | Self::PAGE_EXECUTE_READWRITE.0 | Self::PAGE_EXECUTE_WRITECOPY.0);
+	pub const MEM_EXECUTABLE: Self = Self(
+		Self::PAGE_EXECUTE.0
+			| Self::PAGE_EXECUTE_READ.0
+			| Self::PAGE_EXECUTE_READWRITE.0
+			| Self::PAGE_EXECUTE_WRITECOPY.0,
+	);
+
 	pub const MEM_COW: Self = Self(Self::PAGE_WRITECOPY.0 | Self::PAGE_EXECUTE_WRITECOPY.0);
 
-	pub fn is_writable(&self) -> bool { self.0 & Self::MEM_WRITABLE.0 != 0 }
-	pub fn is_executable(&self) -> bool { self.0 & Self::MEM_EXECUTABLE.0 != 0 }
-	pub fn is_cow(&self) -> bool { self.0 & Self::MEM_COW.0 != 0 }
+	pub fn is_writable(&self) -> bool {
+		self.0 & Self::MEM_WRITABLE.0 != 0
+	}
+	pub fn is_executable(&self) -> bool {
+		self.0 & Self::MEM_EXECUTABLE.0 != 0
+	}
+	pub fn is_cow(&self) -> bool {
+		self.0 & Self::MEM_COW.0 != 0
+	}
 }
 
 impl SystemInformationClass {
@@ -192,10 +227,10 @@ pub const OBJ_INHERIT: u32 = 0x00000002;
 pub const PROCESS_IMAGE_FILENAME_WIN32: u32 = 43;
 
 #[repr(C)]
-#[derive(Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct ClientId {
 	pub unique_process: Handle,
-	pub unique_thread: Handle
+	pub unique_thread: Handle,
 }
 
 #[repr(C)]
@@ -205,11 +240,11 @@ pub struct ObjectAttributes {
 	pub object_name: *const UnicodeString,
 	pub attributes: u32,
 	pub security_descriptor: *mut c_void,
-	pub security_quality_of_service: *mut c_void
+	pub security_quality_of_service: *mut c_void,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Rect {
 	pub left: i32,
 	pub top: i32,
@@ -218,27 +253,28 @@ pub struct Rect {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct Luid {
 	pub low_part: u32,
 	pub high_part: i32,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct LuidAndAttributes {
 	pub luid: Luid,
 	pub attributes: u32,
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct TokenPrivileges {
 	pub privilege_count: u32,
 	pub privileges: [LuidAndAttributes; 1],
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct SystemInfo {
 	pub processor_architecture: u16,
 	reserved: u16,
@@ -261,6 +297,7 @@ pub struct UnicodeString {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct MemoryBasicInformation {
 	pub base_address: *mut c_void,
 	pub allocation_base: *mut c_void,
@@ -278,10 +315,11 @@ pub struct SystemBasicProcessInformation {
 	pub unique_process_id: usize,
 	pub inherited_from_unique_process_id: usize,
 	pub sequence_number: u64,
-	pub image_name: UnicodeString
+	pub image_name: UnicodeString,
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct ProcessBasicInformation {
 	pub exit_status: i32,
 	pub peb_base_address: *mut c_void,
@@ -292,6 +330,7 @@ pub struct ProcessBasicInformation {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct SystemBasicInformation {
 	pub reserved: u32,
 	pub timer_resolution: u32,
@@ -309,7 +348,7 @@ pub struct SystemBasicInformation {
 pub unsafe fn open_process(
 	desired_access: u32,
 	inherit_handle: bool,
-	process_id: u32
+	process_id: u32,
 ) -> Result<Handle, NtStatus> {
 	let mut handle: Handle = Default::default();
 
@@ -341,16 +380,14 @@ pub unsafe fn open_process(
 
 pub unsafe fn open_process_token(
 	process_handle: Handle,
-	desired_access: u32
+	desired_access: u32,
 ) -> Result<Handle, NtStatus> {
 	let mut token_handle: Handle = Default::default();
 
 	unsafe {
-		NtOpenProcessToken(
-			process_handle,
-			desired_access,
-			&mut token_handle,
-		).into_result().map(|_| token_handle)
+		NtOpenProcessToken(process_handle, desired_access, &mut token_handle)
+			.into_result()
+			.map(|_| token_handle)
 	}
 }
 
@@ -362,14 +399,11 @@ pub unsafe fn adjust_token_privileges(
 	previous_state: Option<&mut TokenPrivileges>,
 	return_length: Option<&mut u32>,
 ) -> Result<(), NtStatus> {
-	let new_state_ptr = new_state
-		.map_or(null(), |r| r as *const TokenPrivileges);
+	let new_state_ptr = new_state.map_or(null(), from_ref);
 
-	let previous_state_ptr = previous_state
-		.map_or(null_mut(), |r| r as *mut TokenPrivileges);
+	let previous_state_ptr = previous_state.map_or(null_mut(), from_mut);
 
-	let return_length_ptr = return_length
-		.map_or(null_mut(), |r| r as *mut u32);
+	let return_length_ptr = return_length.map_or(null_mut(), from_mut);
 
 	unsafe {
 		NtAdjustPrivilegesToken(
@@ -379,7 +413,8 @@ pub unsafe fn adjust_token_privileges(
 			buffer_length,
 			previous_state_ptr,
 			return_length_ptr,
-		).into_result()
+		)
+		.into_result()
 	}
 }
 
@@ -398,79 +433,74 @@ pub fn virtual_query_ex(
 			&raw mut mem_info as _,
 			size_of::<MemoryBasicInformation>(),
 			&mut return_length,
-		).into_result().map(|_| (mem_info, return_length))
+		)
+		.into_result()
+		.map(|_| (mem_info, return_length))
 	}
 }
 
-pub unsafe fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> { unsafe {
-	let mut pbi = std::mem::zeroed::<ProcessBasicInformation>();
+pub unsafe fn get_process_id(process_handle: Handle) -> Result<Pid, NtStatus> {
+	let mut pbi = ProcessBasicInformation::default();
 	let mut return_length = 0;
 
-	let status = NtQueryInformationProcess(
-		process_handle,
-		0,
-		&raw mut pbi as _,
-		size_of::<ProcessBasicInformation>() as u32,
-		&mut return_length,
-	);
-
-	status.into_result().map(|_| (pbi.unique_process_id as u32).into())
-} }
+	unsafe {
+		NtQueryInformationProcess(
+			process_handle,
+			0,
+			&raw mut pbi as _,
+			size_of::<ProcessBasicInformation>() as u32,
+			&mut return_length,
+		)
+		.into_result()
+		.map(|_| (pbi.unique_process_id as u32).into())
+	}
+}
 
 pub unsafe fn query_full_process_image_name(
 	process_handle: Handle,
-	buffer: &mut [u16]
-) -> Result<u32, NtStatus> { unsafe {
+	buffer: &mut [u16],
+) -> Result<u32, NtStatus> {
 	let buff_len = buffer.len() * 2;
 	let mut return_length = 0;
 
-	let status = NtQueryInformationProcess(
-		process_handle,
-		PROCESS_IMAGE_FILENAME_WIN32,
-		buffer.as_mut_ptr() as _,
-		buff_len as _,
-		&mut return_length,
-	);
+	unsafe {
+		NtQueryInformationProcess(
+			process_handle,
+			PROCESS_IMAGE_FILENAME_WIN32,
+			buffer.as_mut_ptr() as _,
+			buff_len as _,
+			&mut return_length,
+		)
+		.into_result()
+		.map(|_| return_length)
+	}
+}
 
-	status.into_result().map(|_| return_length)
-} }
-
-pub unsafe fn get_system_info() -> Result<SystemBasicInformation, NtStatus> { unsafe {
-	let mut sbi = std::mem::zeroed::<SystemBasicInformation>();
+pub unsafe fn get_system_info() -> Result<SystemBasicInformation, NtStatus> {
+	let mut sbi = SystemBasicInformation::default();
 	let mut return_length = 0;
-
-	NtQuerySystemInformation(
-		SystemInformationClass(0),
-		&raw mut sbi as _,
-		size_of::<SystemBasicInformation>() as u32,
-		&mut return_length,
-	).into_result().map(|_| sbi)
-} }
-
+	unsafe {
+		NtQuerySystemInformation(
+			SystemInformationClass(0),
+			&raw mut sbi as _,
+			size_of::<SystemBasicInformation>() as u32,
+			&mut return_length,
+		)
+		.into_result()
+		.map(|_| sbi)
+	}
+}
 
 #[link(name = "user32")]
 unsafe extern "system" {
 	pub fn EnumWindows(
 		enum_func: Option<unsafe extern "system" fn(Hwnd, isize) -> i32>,
-		param: isize
+		param: isize,
 	) -> i32;
-	pub fn GetWindowLongPtrW(
-		window: Hwnd,
-		index: i32
-	) -> isize;
-	pub fn GetWindowRect(
-		window: Hwnd,
-		rect: *mut Rect
-	) -> i32;
-	pub fn GetWindowTextW(
-		window: Hwnd,
-		string: *mut u16,
-		max_count: i32
-	) -> i32;
-	pub fn GetWindowThreadProcessId(
-		window: Hwnd,
-		process_id: *mut u32
-	) -> u32;
+	pub fn GetWindowLongPtrW(window: Hwnd, index: i32) -> isize;
+	pub fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+	pub fn GetWindowTextW(window: Hwnd, string: *mut u16, max_count: i32) -> i32;
+	pub fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
 	pub fn IsIconic(window: Hwnd) -> i32;
 	pub fn IsWindowVisible(window: Hwnd) -> i32;
 }
@@ -486,17 +516,32 @@ unsafe extern "system" {
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
-	pub fn RtlGetLastWin32Error() -> Win32Error;
 	pub fn RtlGetLastNtStatus() -> NtStatus;
+	pub fn RtlGetLastWin32Error() -> Win32Error;
 	pub fn RtlNtStatusToDosError(status: NtStatus) -> Win32Error;
 	pub fn NtSuspendProcess(process: Handle) -> NtStatus;
 	pub fn NtResumeProcess(process: Handle) -> NtStatus;
+	pub fn NtClose(handle: Handle) -> NtStatus;
+
+	pub fn NtOpenProcessToken(
+		process_handle: Handle,
+		desired_access: u32,
+		token_handle: *mut Handle,
+	) -> NtStatus;
+
+	pub fn NtOpenProcess(
+		process_handle: *mut Handle,
+		desired_access: u32,
+		object_attributes: *mut ObjectAttributes,
+		client_id: *mut ClientId,
+	) -> NtStatus;
+
 
 	pub fn NtQuerySystemInformation(
 		system_information_class: SystemInformationClass,
 		system_information: *mut c_void,
 		system_information_length: u32,
-		return_length: *mut u32
+		return_length: *mut u32,
 	) -> NtStatus;
 
 	pub fn NtGetNextThread(
@@ -505,7 +550,7 @@ unsafe extern "system" {
 		access_mask: u32,
 		attributes: u32,
 		flags: u32,
-		new_handle: *mut Handle
+		new_handle: *mut Handle,
 	) -> NtStatus;
 
 	pub fn NtGetNextProcess(
@@ -513,7 +558,7 @@ unsafe extern "system" {
 		access_mask: u32,
 		attributes: u32,
 		flags: u32,
-		new_handle: *mut Handle
+		new_handle: *mut Handle,
 	) -> NtStatus;
 
 	pub fn NtReadVirtualMemory(
@@ -529,20 +574,7 @@ unsafe extern "system" {
 		address: *const c_void,
 		buffer: *const c_void,
 		num_to_write: usize,
-		num_written: *mut usize
-	) -> NtStatus;
-
-	pub fn NtOpenProcess(
-		process_handle: *mut Handle,
-		desired_access: u32,
-		object_attributes: *mut ObjectAttributes,
-		client_id: *mut ClientId,
-	) -> NtStatus;
-
-	pub fn NtOpenProcessToken(
-		process_handle: Handle,
-		desired_access: u32,
-		token_handle: *mut Handle
+		num_written: *mut usize,
 	) -> NtStatus;
 
 	pub fn NtAdjustPrivilegesToken(
@@ -562,8 +594,6 @@ unsafe extern "system" {
 		memory_information_length: usize,
 		return_length: *mut usize,
 	) -> NtStatus;
-
-	pub fn NtClose(handle: Handle) -> NtStatus;
 
 	pub fn NtQueryInformationProcess(
 		process_handle: Handle,

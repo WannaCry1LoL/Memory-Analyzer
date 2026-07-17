@@ -1,7 +1,6 @@
-use std::mem::MaybeUninit;
-use std::slice;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
+
 use crate::errors::MemoryScanError;
 use crate::matches::MatchingState;
 use crate::mem2disk::{BlockDescriptor, DumpFlags, ScanDiskManager};
@@ -44,8 +43,7 @@ pub enum ValueType {
 #[derive(Debug, Clone)]
 pub struct ScanRequest {
 	pub value_type: ValueType,
-	pub compare_to_first_scan: bool,
-	pub freeze_process: bool
+	pub freeze_process: bool,
 }
 
 fn to_bit_pattern<T: Scannable + FromU128>(x: i128) -> T {
@@ -58,12 +56,13 @@ fn to_bit_pattern<T: Scannable + FromU128>(x: i128) -> T {
 impl<T: Scannable + FromU128> From<IntCondition> for ScanCondition<T> {
 	fn from(x: IntCondition) -> Self {
 		match x {
-			IntCondition::Range(lo, hi) => ScanCondition::from_logical_range(lo, hi),
-			IntCondition::Eq(n) => ScanCondition::<T>::Eq(to_bit_pattern(n)),
-			IntCondition::NotEq(n) => ScanCondition::<T>::NotEq(to_bit_pattern(n)),
-			IntCondition::GreaterThan(n) => ScanCondition::<T>::from_greater_than(to_bit_pattern(n)),
-			IntCondition::LessThan(n) => ScanCondition::<T>::from_less_than(to_bit_pattern(n)),
-			IntCondition::FuzzyEq(n, eps) => ScanCondition::<T>::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps)),
+			IntCondition::Range(lo, hi) => Self::from_logical_range(lo, hi),
+			IntCondition::Eq(n) => Self::Eq(to_bit_pattern(n)),
+			IntCondition::NotEq(n) => Self::NotEq(to_bit_pattern(n)),
+			IntCondition::GreaterThan(n) => Self::from_greater_than(to_bit_pattern(n)),
+			IntCondition::LessThan(n) => Self::from_less_than(to_bit_pattern(n)),
+			IntCondition::FuzzyEq(n, eps) =>
+				Self::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps))
 		}
 	}
 }
@@ -71,12 +70,12 @@ impl<T: Scannable + FromU128> From<IntCondition> for ScanCondition<T> {
 impl From<FloatCondition> for ScanCondition<f32> {
 	fn from(x: FloatCondition) -> Self {
 		match x {
-			FloatCondition::Eq(n) => ScanCondition::Eq(n as f32),
-			FloatCondition::NotEq(n) => ScanCondition::NotEq(n as f32),
-			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo as f32, hi as f32),
-			FloatCondition::LessThan(n) => ScanCondition::<f32>::from_less_than(n as f32),
-			FloatCondition::GreaterThan(n) => ScanCondition::<f32>::from_greater_than(n as f32),
-			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n as f32, eps as f32),
+			FloatCondition::Eq(n) => Self::Eq(n as f32),
+			FloatCondition::NotEq(n) => Self::NotEq(n as f32),
+			FloatCondition::Range(lo, hi) => Self::Range(lo as f32, hi as f32),
+			FloatCondition::LessThan(n) => Self::from_less_than(n as f32),
+			FloatCondition::GreaterThan(n) => Self::from_greater_than(n as f32),
+			FloatCondition::FuzzyEq(n, eps) => Self::FuzzyEq(n as f32, eps as f32),
 		}
 	}
 }
@@ -84,35 +83,31 @@ impl From<FloatCondition> for ScanCondition<f32> {
 impl From<FloatCondition> for ScanCondition<f64> {
 	fn from(x: FloatCondition) -> Self {
 		match x {
-			FloatCondition::Eq(n) => ScanCondition::Eq(n),
-			FloatCondition::NotEq(n) => ScanCondition::NotEq(n),
-			FloatCondition::Range(lo, hi) => ScanCondition::Range(lo, hi),
-			FloatCondition::LessThan(n) => ScanCondition::from_less_than(n),
-			FloatCondition::GreaterThan(n) => ScanCondition::from_greater_than(n),
-			FloatCondition::FuzzyEq(n, eps) => ScanCondition::FuzzyEq(n, eps),
+			FloatCondition::Eq(n) => Self::Eq(n),
+			FloatCondition::NotEq(n) => Self::NotEq(n),
+			FloatCondition::Range(lo, hi) => Self::Range(lo, hi),
+			FloatCondition::LessThan(n) => Self::from_less_than(n),
+			FloatCondition::GreaterThan(n) => Self::from_greater_than(n),
+			FloatCondition::FuzzyEq(n, eps) => Self::FuzzyEq(n, eps),
 		}
 	}
 }
 
 impl ScanRequest {
-	pub fn default_alignment(&self) -> usize {
+	#[inline]
+	pub const fn default_alignment(&self) -> usize {
 		match &self.value_type {
-			ValueType::Byte(_) => 1,
+			ValueType::Byte(_) | ValueType::ByteArray(_) => 1,
 			ValueType::TwoBytes(_) => 2,
-			ValueType::FourBytes(_) | ValueType::EightBytes(_) | ValueType::Float(_) | ValueType::Double(_)=> 4,
-			ValueType::ByteArray(_) => 1,
+			ValueType::FourBytes(_) | ValueType::Float(_) => 4,
+			ValueType::EightBytes(_) | ValueType::Double(_) => 8,
 		}
 	}
 
-	fn element_size(&self) -> usize {
+	const fn element_size(&self) -> usize {
 		match &self.value_type {
-			ValueType::Byte(_) => size_of::<u8>(),
-			ValueType::TwoBytes(_) => size_of::<u16>(),
-			ValueType::FourBytes(_) => size_of::<u32>(),
-			ValueType::EightBytes(_) => size_of::<u64>(),
-			ValueType::Float(_) => size_of::<f32>(),
-			ValueType::Double(_) => size_of::<f64>(),
 			ValueType::ByteArray(p) => p.len(),
+			_ => self.default_alignment(),
 		}
 	}
 
@@ -141,18 +136,17 @@ impl ScanRequest {
 	}
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
 	pub use_custom_alignment: bool,
-	pub custom_alignment: usize
+	pub custom_alignment: usize,
 }
 
 impl Default for ScanOptions {
 	fn default() -> Self {
-		ScanOptions {
+		Self {
 			use_custom_alignment: false,
-			custom_alignment: 4
+			custom_alignment: 4,
 		}
 	}
 }
@@ -160,12 +154,14 @@ impl Default for ScanOptions {
 #[derive(Debug, Clone, Default)]
 pub struct MemoryScannerOptions {
 	pub scan_options: ScanOptions,
-	pub dump_options: DumpFlags
+	pub dump_options: DumpFlags,
 }
 
 impl MemoryScannerOptions {
 	pub fn resolve_alignment(&self, or: &ScanRequest) -> usize {
-		if self.scan_options.use_custom_alignment { self.scan_options.custom_alignment } else { or.default_alignment() }
+		self.scan_options.use_custom_alignment
+			.then_some(self.scan_options.custom_alignment)
+			.unwrap_or_else(|| or.default_alignment())
 	}
 }
 
@@ -176,13 +172,11 @@ pub struct MemoryScanner {
 	pub options: MemoryScannerOptions,
 }
 
-// TODO: narrow scans
-
 impl MemoryScanner {
 	pub fn new(mut process: Process, options: MemoryScannerOptions) -> Result<Self, std::io::Error> {
-		process
-			.init_handle()
-			.map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{:?}", e)))?;
+		process.init_handle().map_err(|e| {
+			std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{:?}", e))
+		})?;
 		let handle = process.get_handle();
 
 		let file_manager = ScanDiskManager::new(handle, options.dump_options);
@@ -196,9 +190,13 @@ impl MemoryScanner {
 	}
 
 	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
-		self.process.init_handle().map_err(|_| MemoryScanError::HandleInitFailed)?;
+		self.process
+			.init_handle()
+			.map_err(|_| MemoryScanError::HandleInitFailed)?;
 
-		let _guard = request.freeze_process.then(|| self.process.suspend_guard().ok()).flatten();
+		let _guard = request.freeze_process
+			.then(|| self.process.suspend_guard().ok())
+			.flatten();
 
 		let alignment = self.options.resolve_alignment(&request);
 		let element_size = request.element_size();
@@ -206,17 +204,12 @@ impl MemoryScanner {
 		let mut new_state = MatchingState::new(alignment, element_size, true);
 
 		let process = &self.process;
-		let mut capacity = 0;
-		let mut block_offsets = Vec::with_capacity(blocks.len());
-		for block in &blocks {
-			block_offsets.push(capacity);
-			capacity += block.size;
-		}
+		let capacity = blocks.iter().map(|x| x.size).sum();
 
 		let mut main_buffer = Vec::<u8>::with_capacity(capacity);
 		let mut remaining_buf = main_buffer.spare_capacity_mut();
 		let mut chunk_slices = Vec::with_capacity(blocks.len());
-
+	
 		for block in &blocks {
 			let (left, right) = remaining_buf.split_at_mut(block.size);
 			chunk_slices.push(left);
@@ -228,15 +221,18 @@ impl MemoryScanner {
 			.zip(chunk_slices)
 			.filter_map(|(desc, buf)| {
 				let read = process.get_chunk_into(desc, buf).ok()?;
-				let mem = unsafe { buf[..read].assume_init_ref() };
+				let mem = unsafe { get!(buf, ..read).assume_init_ref() };
 
 				let mask = request.run(mem, alignment);
+				
 				let ones = mask.count_ones();
 				if ones == 0 { return None; }
 
 				let mut matched: Vec<u8> = Vec::with_capacity(ones * element_size);
 				for i in mask.iter_ones() {
-					matched.extend_from_slice(get!(mem, i * alignment .. i * alignment + element_size));
+					matched.extend_from_slice(
+						get!(mem, i * alignment, element_size)
+					);
 				}
 
 				Some((desc.virtual_address, mask, matched))
@@ -259,15 +255,16 @@ impl MemoryScanner {
 			return Err(MemoryScanError::IncompatibleScanType);
 		}
 
-		let _guard = request.freeze_process.then(|| self.process.suspend_guard().ok()).flatten();
+		let _guard = request.freeze_process
+			.then(|| self.process.suspend_guard().ok())
+			.flatten();
 
 		let mut new_state = MatchingState::new(alignment, elem_size, false);
 
 		let process = &self.process;
 		let state = &self.state;
-
-		let initial = if state.initial_scan { &state.data } else { &state.initial };
-
+		let initial = state.get_initial();
+		
 		let mut capacity = 0;
 		for block in &state.blocks {
 			let mask_len = block.match_mask.len();
@@ -302,7 +299,7 @@ impl MemoryScanner {
 				let desc = BlockDescriptor::new(block.base_address, read_size);
 
 				let read = process.get_chunk_into(&desc, buf).ok()?;
-				let mem = unsafe { buf[..read].assume_init_ref() };
+				let mem = unsafe { get!(buf, ..read).assume_init_ref() };
 
 				let mut new_mask = MatchMask::repeat(false, mask_len);
 
@@ -312,18 +309,17 @@ impl MemoryScanner {
 
 				for (k, i) in block.match_mask.iter_ones().enumerate() {
 					let offset = i * alignment;
-					if offset + elem_size > mem.len() {
-						break;
-					}
+					if offset + elem_size > mem.len() { break; }
 
-					let bytes = get!(mem, offset .. offset + elem_size);
+					let bytes = get!(mem, offset, elem_size);
 
 					if request.test_bytes(bytes) {
 						new_mask.set(i, true);
 						current_values.extend_from_slice(bytes);
 
 						let old_off = block.data_offset + k * elem_size;
-						initial_values.extend_from_slice(get!(initial, old_off .. old_off + elem_size));
+						initial_values
+							.extend_from_slice(get!(initial, old_off, elem_size));
 					}
 				}
 
