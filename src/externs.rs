@@ -23,8 +23,8 @@ pub trait IntoResult: Sized {
 pub struct Pid(pub u32);
 
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
-pub struct Handle(pub *mut c_void);
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Handle(pub usize);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
@@ -46,41 +46,24 @@ pub struct PageProtectionFlags(pub u32);
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct SystemInformationClass(pub i32);
 
-unsafe impl Send for Handle {}
-unsafe impl Sync for Handle {}
-unsafe impl Send for Hwnd {}
-unsafe impl Sync for Hwnd {}
-unsafe impl Send for Pid {}
-unsafe impl Sync for Pid {}
-
 impl AsRawHandle for Handle {
-	fn as_raw_handle(&self) -> RawHandle {
-		self.0.cast()
-	}
+	fn as_raw_handle(&self) -> RawHandle { self.0 as _ }
 }
 
 impl IntoRawHandle for Handle {
-	fn into_raw_handle(self) -> RawHandle {
-		self.0.cast()
-	}
+	fn into_raw_handle(self) -> RawHandle { self.0 as _ }
 }
 
 impl FromRawHandle for Handle {
-	unsafe fn from_raw_handle(handle: RawHandle) -> Self {
-		Self(handle.cast())
-	}
+	unsafe fn from_raw_handle(handle: RawHandle) -> Self { Self(handle as usize) }
 }
 
 impl From<OwnedHandle> for Handle {
-	fn from(handle: OwnedHandle) -> Self {
-		Self(handle.into_raw_handle().cast())
-	}
+	fn from(handle: OwnedHandle) -> Self { Self(handle.into_raw_handle() as _) }
 }
 
 impl<'a> From<BorrowedHandle<'a>> for Handle {
-	fn from(handle: BorrowedHandle<'a>) -> Self {
-		Self(handle.as_raw_handle().cast())
-	}
+	fn from(handle: BorrowedHandle<'a>) -> Self { Self(handle.as_raw_handle() as _) }
 }
 
 impl IntoResult for NtStatus {
@@ -116,23 +99,18 @@ impl From<Pid> for u32 {
 }
 
 impl Handle {
-	pub const INVALID: Self = Self(-1isize as *mut c_void);
-	pub const CURRENT_PROCESS: Self = Self::INVALID;
-	pub const NULL: Self = Self(null_mut());
+	pub const CURRENT_PROCESS: Self = Self(-1isize as _);
+	pub const NULL: Self = Self(0);
 
 	#[inline]
-	pub fn is_invalid(&self) -> bool {
-		self.0.is_null() || self.0 == Self::INVALID.0
-	}
+	pub fn is_invalid(&self) -> bool { self.0 == Self::NULL.0 }
 }
 
 impl Hwnd {
 	pub const NULL: Self = Self(0);
 
 	#[inline]
-	pub fn is_invalid(&self) -> bool {
-		self.0 == 0
-	}
+	pub fn is_invalid(&self) -> bool { self.0 == 0 }
 }
 
 impl NtStatus {
@@ -292,10 +270,13 @@ pub struct LuidAndAttributes {
 	pub attributes: u32,
 }
 
+/// THIS STRUCT ONLY WORKS FOR EXACTLY ONE PRIVILEGE
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TokenPrivileges {
 	pub privilege_count: u32,
+	// This should be a VLA, but VLAs are difficult to express in rust
+	// Instead we just declare it as length 1 because we only ever need the first member anyway
 	pub privileges: [LuidAndAttributes; 1],
 }
 
@@ -448,7 +429,7 @@ pub fn virtual_query_ex(
 	process_handle: Handle,
 	base_address: *const c_void,
 ) -> Result<(MemoryBasicInformation, usize), NtStatus> {
-	let mut mem_info = unsafe { std::mem::zeroed() };
+	let mut mem_info = Default::default();
 	let mut return_length = 0;
 
 	unsafe {
@@ -612,7 +593,8 @@ pub fn write_bytes(
 	status.into_result().map_err(MemoryWriteError::Other)
 }
 
-pub fn read_generic<T: Sized>(handle: Handle, address: *const u8) -> Result<T, MemoryReadError> {
+// We don't really need Copy but it prevents passing many dangerous types like String or Vec
+pub fn read_generic<T: Sized + Copy>(handle: Handle, address: *const u8) -> Result<T, MemoryReadError> {
 	let mut mem = MaybeUninit::<T>::uninit();
 	let res = read_bytes(handle, address, mem.as_mut_ptr() as _, size_of::<T>());
 	let read = res?;
@@ -622,7 +604,7 @@ pub fn read_generic<T: Sized>(handle: Handle, address: *const u8) -> Result<T, M
 	Ok(unsafe { mem.assume_init() })
 }
 
-pub fn write_generic<T: Sized>(
+pub fn write_generic<T: Sized + Copy>(
 	handle: Handle,
 	address: *const u8,
 	value: T,
@@ -640,7 +622,7 @@ pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
 	)
 		.map_err(|_| ElevationError::Unknown)?;
 
-	let guard = OwnedHandle::from_raw_handle(token.0);
+	let guard = OwnedHandle::from_raw_handle(token.as_raw_handle());
 
 	let mut luid = Luid::default();
 	let priv_name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
@@ -662,7 +644,7 @@ pub fn enable_debug_privilege() -> Result<(), ElevationError> { unsafe {
 		None,
 		None,
 	)
-		.map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
+	.map_err(|_| ElevationError::PrivilegeAdjustmentFailed)?;
 
 	match RtlGetLastWin32Error() {
 		Win32Error::ERROR_NOT_ALL_ASSIGNED => Err(ElevationError::PrivilegeNotAssigned),

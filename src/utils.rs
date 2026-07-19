@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::ptr::read_unaligned;
 use bitvec::vec::BitVec;
 
-use crate::utils::TriState::{DontCare, False, True};
 use crate::externs::{enum_proc_info, query_full_process_image_name, Handle, Pid, UnicodeString};
+use crate::errors::ProcessImagePathError::{self, InvalidUtf16ImagePath};
+use crate::utils::TriState::{DontCare, False, True};
 
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
 
@@ -100,7 +101,6 @@ pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePath
 		.map_err(|_| InvalidUtf16ImagePath)
 }
 
-
 pub fn string_to_bytes_radix(s: &str, radix: Option<u32>) -> Result<Vec<u8>, ()> {
 	let radix = radix.unwrap_or(10);
 	if radix < 2 || radix > 36 { return Err(()) }
@@ -152,5 +152,3 @@ macro_rules! get {
 }
 
 pub(crate) use get;
-use crate::errors::ProcessImagePathError;
-use crate::errors::ProcessImagePathError::InvalidUtf16ImagePath;
