@@ -24,12 +24,7 @@ impl NtStatus {
 	pub const STATUS_INFO_LENGTH_MISMATCH: Self = Self(0xC0000004_u32 as _);
 	pub const STATUS_ACCESS_DENIED: Self = Self(0xC0000022_u32 as _);
 	pub const STATUS_INVALID_HANDLE: Self = Self(0xC0000008_u32 as _);
-}
-
-impl Win32Error {
-	pub const ERROR_ACCESS_DENIED: Win32Error = Win32Error(5);
-	pub const ERROR_INVALID_HANDLE: Win32Error = Win32Error(6);
-	pub const ERROR_NOT_ALL_ASSIGNED: Win32Error = Win32Error(1300);
+	pub const STATUS_NOT_ALL_ASSIGNED: Self = Self(0x00000106_u32 as _);
 }
 
 impl PageProtectionFlags {

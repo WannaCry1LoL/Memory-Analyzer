@@ -110,7 +110,6 @@ impl Hwnd {
 }
 
 impl NtStatus {
-
 	#[inline]
 	pub const fn get_type(&self) -> NtStatusType {
 		match self.0 as u32 >> 30 {
@@ -212,7 +211,7 @@ pub struct LuidAndAttributes {
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TokenPrivileges {
 	pub privilege_count: u32,
-	// This should be a VLA, but VLAs are difficult to express in rust
+	// This should be a FAM, but FAMs are difficult to express in rust
 	// Instead we just declare it as length 1 because we only ever need the first member anyway
 	pub privileges: [LuidAndAttributes; 1],
 }
@@ -223,8 +222,8 @@ pub struct SystemInfo {
 	pub processor_architecture: u16,
 	reserved: u16,
 	pub page_size: u32,
-	pub minimum_application_address: *mut c_void,
-	pub maximum_application_address: *mut c_void,
+	pub minimum_application_address: usize,
+	pub maximum_application_address: usize,
 	pub active_processor_mask: usize,
 	pub number_of_processors: u32,
 	pub processor_type: u32,

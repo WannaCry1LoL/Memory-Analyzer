@@ -1,27 +1,12 @@
-use std::convert::TryFrom;
-use std::mem::MaybeUninit;
 use crate::errors::{MemoryReadError, MemoryWriteError, ProcessError, ProcessOperationError};
-use crate::externs::*;
 use crate::ffi::constants::{PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION};
-use crate::ffi::ffi::{EnumWindows, GetWindowThreadProcessId};
 use crate::ffi::types::{Handle, Hwnd, NtStatus, Pid};
+use crate::ffi::wrappers::*;
 use crate::mem2disk::BlockDescriptor;
 use crate::utils::get_process_image_path;
-use crate::ffi::wrappers::{close, get_process_id, open_process, read_bytes, resume_process, suspend_process, write_bytes, is_valid_target_window};
-
-struct WindowSearchState {
-	found_windows: Vec<Hwnd>,
-}
-
-unsafe extern "system" fn enum_windows_filter_callback(hwnd: Hwnd, l_param: isize) -> i32 { unsafe {
-	let Some(state) = (l_param as *mut WindowSearchState).as_mut() else {
-		return 1
-	};
-
-	if is_valid_target_window(hwnd) { state.found_windows.push(hwnd); }
-
-	1
-} }
+use std::convert::TryFrom;
+use std::mem::MaybeUninit;
+use std::ops::ControlFlow;
 
 pub struct SuspendGuard<'a> {
 	process: &'a Process,
@@ -54,8 +39,8 @@ impl Clone for Process {
 }
 
 impl Process {
-	fn from_pid_raw(pid: u32) -> Result<Self, ErrorType> {
-		if pid == 0 { return Err(ErrorType::InvalidPid) }
+	fn from_pid_raw(pid: Pid) -> Result<Self, ErrorType> {
+		if pid.0 == 0 { return Err(ErrorType::InvalidPid) }
 
 		let res = unsafe { open_process(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
 
@@ -85,28 +70,24 @@ impl Process {
 		if handle.is_invalid() {
 			return Err(ErrorType::InvalidHandle);
 		}
-		unsafe {
-			let proc_id = get_process_id(handle).map_err(|x| match x {
-				NtStatus::STATUS_ACCESS_DENIED => ErrorType::HandleLacksPermissions,
-				NtStatus::STATUS_INVALID_HANDLE => ErrorType::InvalidHandle,
-				_ => ErrorType::Unknown,
-			})?;
+		let proc_id = get_process_id(handle).map_err(|x| match x {
+			NtStatus::STATUS_ACCESS_DENIED => ErrorType::HandleLacksPermissions,
+			NtStatus::STATUS_INVALID_HANDLE => ErrorType::InvalidHandle,
+			_ => ErrorType::Unknown,
+		})?;
 
-			Self::from_pid_raw(proc_id.0)
-		}
+		Self::from_pid_raw(proc_id)
 	}
 
 	pub fn get_valid_windows_processes() -> Vec<Process> {
-		let mut state = WindowSearchState {
-			found_windows: Vec::new(),
-		};
+		let mut found_windows = Vec::new();
 
-		unsafe {
-			let l_param = &raw mut state as _;
-			let _ = EnumWindows(Some(enum_windows_filter_callback), l_param);
-		}
+		let _ = enum_windows(|hwnd| {
+			if is_valid_target_window(hwnd) { found_windows.push(hwnd); };
+			ControlFlow::<()>::Continue(())
+		});
 
-		state.found_windows
+		found_windows
 			.into_iter()
 			.filter_map(|hwnd| Process::try_from(hwnd).ok())
 			.collect()
@@ -126,23 +107,9 @@ impl Process {
 		Ok(())
 	}
 
-	pub fn get_handle(&self) -> Handle {
-		self.handle
-	}
+	pub fn get_handle(&self) -> Handle { self.handle }
 
-	pub fn get_pid(&self) -> Pid {
-		self.pid
-	}
-
-	#[inline]
-	pub fn get_chunk(&self, block_descriptor: &BlockDescriptor) -> Result<Vec<u8>, MemoryReadError> {
-		let mut buffer = Vec::with_capacity(block_descriptor.size);
-		let spare = buffer.spare_capacity_mut();
-		self.get_chunk_into(block_descriptor, spare).map(|x| {
-			unsafe { buffer.set_len(x); }
-			buffer
-		})
-	}
+	pub fn get_pid(&self) -> Pid { self.pid }
 
 	pub fn get_chunk_into(
 		&self,
@@ -179,19 +146,13 @@ impl Process {
 			return Err(ProcessOperationError::CannotSuspendSelf);
 		}
 
-		unsafe {
-			suspend_process(self.handle)
-				.map_err(ProcessOperationError::SuspendFailed)
-		}
+		suspend_process(self.handle).map_err(ProcessOperationError::SuspendFailed)
 	}
 
 	pub fn resume(&self) -> Result<(), ProcessOperationError> {
 		assert!(!self.handle.is_invalid());
 
-		unsafe {
-			resume_process(self.handle)
-				.map_err(ProcessOperationError::ResumeFailed)
-		}
+		resume_process(self.handle).map_err(ProcessOperationError::ResumeFailed)
 	}
 
 	pub fn suspend_guard(&self) -> Result<SuspendGuard<'_>, ProcessOperationError> {
@@ -199,9 +160,7 @@ impl Process {
 		Ok(SuspendGuard { process: self })
 	}
 
-	pub fn format_name(&self) -> String {
-		format!("{:08X}-{}", self.pid, self.image_name)
-	}
+	pub fn format_name(&self) -> String { format!("{:08X}-{}", self.pid, self.image_name) }
 }
 
 impl TryFrom<Handle> for Process {
@@ -213,14 +172,12 @@ impl TryFrom<Hwnd> for Process {
 	type Error = ErrorType;
 
 	fn try_from(value: Hwnd) -> Result<Self, Self::Error> {
-		unsafe {
-			if value.is_invalid() {
-				return Err(ErrorType::InvalidHWND);
-			}
-			let mut res = 0u32;
-			let _ = GetWindowThreadProcessId(value, &mut res);
-			Self::from_pid_raw(res)
+		if value.is_invalid() {
+			return Err(ErrorType::InvalidHWND);
 		}
+		let res = get_process_id_from_window(value)
+			.map_err(|_| ErrorType::Unknown)?;
+		Self::from_pid_raw(res)
 	}
 }
 
