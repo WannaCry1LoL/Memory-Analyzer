@@ -1,32 +1,17 @@
 use std::convert::TryFrom;
 use std::mem::MaybeUninit;
-
 use crate::errors::{MemoryReadError, MemoryWriteError, ProcessError, ProcessOperationError};
 use crate::externs::*;
+use crate::ffi::constants::{PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION};
+use crate::ffi::ffi::{EnumWindows, GetWindowThreadProcessId};
+use crate::ffi::types::{Handle, Hwnd, NtStatus, Pid};
 use crate::mem2disk::BlockDescriptor;
 use crate::utils::get_process_image_path;
+use crate::ffi::wrappers::{close, get_process_id, open_process, read_bytes, resume_process, suspend_process, write_bytes, is_valid_target_window};
 
 struct WindowSearchState {
 	found_windows: Vec<Hwnd>,
 }
-
-fn is_valid_target_window(hwnd: Hwnd) -> bool { unsafe {
-	if IsWindowVisible(hwnd) == 0
-		|| IsIconic(hwnd) != 0
-		|| (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0
-	{ return false; }
-
-	let mut rect = Rect::default();
-	if GetWindowRect(hwnd, &mut rect) == 0 { return false; }
-	if (rect.right - rect.left) <= 0 || (rect.bottom - rect.top) <= 0 { return false; }
-
-	let mut buffer = [0u16; 256];
-	let len = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) as usize;
-	if len == 0 { return false; }
-
-	let title = String::from_utf16_lossy(&buffer[..len]);
-	!title.trim().is_empty()
-} }
 
 unsafe extern "system" fn enum_windows_filter_callback(hwnd: Hwnd, l_param: isize) -> i32 { unsafe {
 	let Some(state) = (l_param as *mut WindowSearchState).as_mut() else {
@@ -86,7 +71,7 @@ impl Process {
 			.unwrap_or_default()
 			.to_string();
 
-		unsafe { NtClose(handle) };
+		close(handle).ok();
 
 		Ok(Process {
 			handle: Default::default(),
@@ -167,23 +152,23 @@ impl Process {
 		debug_assert!(!self.handle.is_invalid());
 		debug_assert!(buffer.len() >= block_descriptor.size);
 
-		let read_count = read_bytes(
+		let read_count = unsafe { read_bytes(
 			self.handle,
 			block_descriptor.virtual_address as _,
 			buffer.as_mut_ptr() as _,
 			block_descriptor.size,
-		)?;
+		)? };
 
 		Ok(read_count)
 	}
 
 	pub fn write(&self, addr: *mut u8, bytes: &[u8]) -> Result<(), MemoryWriteError> {
-		write_bytes(self.handle, addr, bytes.as_ptr(), bytes.len())
+		unsafe { write_bytes(self.handle, addr, bytes.as_ptr(), bytes.len()) }
 	}
 
 	pub fn read(&self, addr: *const u8, length: usize) -> Result<Vec<u8>, MemoryReadError> {
 		let mut buf = vec![0u8; length];
-		read_bytes(self.handle, addr, buf.as_mut_ptr(), length)?;
+		unsafe { read_bytes(self.handle, addr, buf.as_mut_ptr(), length)? };
 		Ok(buf)
 	}
 
@@ -195,8 +180,7 @@ impl Process {
 		}
 
 		unsafe {
-			NtSuspendProcess(self.handle)
-				.into_result()
+			suspend_process(self.handle)
 				.map_err(ProcessOperationError::SuspendFailed)
 		}
 	}
@@ -205,8 +189,7 @@ impl Process {
 		assert!(!self.handle.is_invalid());
 
 		unsafe {
-			NtResumeProcess(self.handle)
-				.into_result()
+			resume_process(self.handle)
 				.map_err(ProcessOperationError::ResumeFailed)
 		}
 	}
@@ -244,7 +227,7 @@ impl TryFrom<Hwnd> for Process {
 impl Drop for Process {
 	fn drop(&mut self) {
 		if !self.handle.is_invalid() {
-			unsafe { NtClose(self.handle); }
+			close(self.handle).ok();
 		}
 	}
 }

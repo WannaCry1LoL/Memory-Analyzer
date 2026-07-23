@@ -1,4 +1,5 @@
-use crate::externs::NtStatus;
+use crate::ffi::types::NtStatus;
+
 #[derive(Debug)]
 pub enum ProcessError {
 	/// The handle is invalid

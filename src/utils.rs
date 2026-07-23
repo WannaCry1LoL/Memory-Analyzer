@@ -1,19 +1,13 @@
-use std::collections::HashMap;
 use std::ptr::read_unaligned;
 use bitvec::vec::BitVec;
 
-use crate::externs::{enum_proc_info, query_full_process_image_name, Handle, Pid, UnicodeString};
 use crate::errors::ProcessImagePathError::{self, InvalidUtf16ImagePath};
 use crate::utils::TriState::{DontCare, False, True};
+use crate::ffi::wrappers::query_full_process_image_name;
+use crate::ffi::types::{Handle, UnicodeString};
 
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
 
-#[derive(Debug, PartialEq)]
-pub enum EnumerationState<T> {
-	Continue,
-	Break,
-	Return(T),
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TriState {
@@ -53,28 +47,6 @@ impl TriState {
 
 impl From<bool> for TriState {
 	fn from(v: bool) -> TriState { if v { True } else { False } }
-}
-
-pub fn build_process_tree() -> HashMap<Pid, Vec<Pid>> {
-	let mut ret: HashMap<Pid, Vec<Pid>> = HashMap::new();
-	enum_proc_info(|info| {
-		let ppid = info.inherited_from_unique_process_id as u32;
-		let pid = info.unique_process_id as u32;
-		ret.entry(ppid.into()).or_default().push(pid.into());
-
-		EnumerationState::<()>::Continue
-	});
-	ret
-}
-
-pub fn find_proc_from_image_name(name: &str) -> Option<Pid> {
-	enum_proc_info(|info| {
-		if !info.image_name.buffer.is_null()
-			&& let res = info.image_name.to_string()
-			&& res == name
-		{ EnumerationState::Return((info.unique_process_id as u32).into()) }
-		else { EnumerationState::Continue }
-	})
 }
 
 pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePathError> {

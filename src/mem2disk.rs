@@ -1,5 +1,8 @@
 use crate::externs::*;
+use crate::ffi::constants::{MEM_COMMIT, MEM_PRIVATE, MEM_IMAGE};
+use crate::ffi::types::{Handle, PageProtectionFlags};
 use crate::utils::TriState::{self, DontCare, False, True};
+use crate::ffi::wrappers::virtual_query_ex;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DumpFlags {
