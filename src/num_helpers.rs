@@ -1,7 +1,7 @@
+use std::arch::x86_64::_pext_u64;
 use std::cmp::Ordering;
 use std::ptr::read_unaligned;
 use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
-use std::simd::num::SimdFloat;
 use std::simd::prelude::*;
 
 use bitvec::order::Lsb0;
@@ -123,6 +123,32 @@ pub trait Scannable: PartialEq + PartialOrd + ToSimd + 'static {
 			ScanCondition::FuzzyEq(n, _) => value == n,
 		}
 	}
+}
+
+#[cfg(fast_bmi2)]
+#[inline(always)]
+fn deposit_bits(value: u64, mask: u64) -> u64 {
+	use std::arch::x86_64::_pdep_u64;
+	unsafe { _pdep_u64(value, mask) }
+}
+
+#[cfg(not(fast_bmi2))]
+#[inline(always)]
+fn deposit_bits(value: u64, mask: u64) -> u64 {
+	value.deposit_bits(mask)
+}
+
+#[cfg(fast_bmi2)]
+#[inline(always)]
+fn extract_bits(value: u64, mask: u64) -> u64 {
+	use std::arch::x86_64::_pext_u64;
+	unsafe { _pext_u64(value, mask) }
+}
+
+#[cfg(not(fast_bmi2))]
+#[inline(always)]
+fn extract_bits(value: u64, mask: u64) -> u64 {
+	value.extract_bits(mask)
 }
 
 #[inline]

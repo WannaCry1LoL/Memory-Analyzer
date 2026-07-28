@@ -1,5 +1,7 @@
 #![feature(portable_simd)]
 #![feature(associated_type_defaults)]
+#![feature(uint_gather_scatter_bits)]
+
 extern crate core;
 
 mod errors;
@@ -19,11 +21,10 @@ mod ffi;
 #[cfg(not(all(
 	target_pointer_width = "64",
 	target_os = "windows",
-	target_feature = "bmi2",
 	any(target_feature = "avx2", target_feature = "avx512f",)
 )))]
 compile_error!(
-	"This project requires windows 11 version >= 26100.4770 and a 64-Bit CPU with the following features: BMI2, AVX2 or AVX512F"
+	"This project requires windows 11 version >= 26100.4770 and a 64-Bit CPU with the following features: AVX2 or AVX512F"
 );
 
 use std::io::{self, ErrorKind};
