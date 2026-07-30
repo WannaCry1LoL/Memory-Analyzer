@@ -1,6 +1,5 @@
 #![feature(portable_simd)]
 #![feature(associated_type_defaults)]
-#![feature(uint_gather_scatter_bits)]
 
 extern crate core;
 

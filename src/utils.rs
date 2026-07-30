@@ -2,12 +2,12 @@ use std::ptr::read_unaligned;
 use bitvec::vec::BitVec;
 
 use crate::errors::ProcessImagePathError::{self, InvalidUtf16ImagePath};
-use crate::utils::TriState::{DontCare, False, True};
 use crate::ffi::wrappers::query_full_process_image_name;
 use crate::ffi::types::{Handle, UnicodeString};
+use Alignment::*;
+use TriState::*;
 
 pub type MatchMask = BitVec<u64, bitvec::prelude::Lsb0>;
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TriState {
@@ -47,6 +47,48 @@ impl TriState {
 
 impl From<bool> for TriState {
 	fn from(v: bool) -> TriState { if v { True } else { False } }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub enum Alignment {
+	OneByte = 1,
+	TwoByte = 2,
+	FourByte = 4,
+	EightByte = 8,
+	SixteenByte = 16,
+	ThirtyTwoByte = 32
+}
+
+impl Alignment {
+	pub const ALL: [Self; 6] = [
+		OneByte,
+		TwoByte,
+		FourByte,
+		EightByte,
+		SixteenByte,
+		ThirtyTwoByte
+	];
+
+	pub fn cycle(self, dir: i32) -> Self {
+		let all = Self::ALL;
+		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
+		let len = all.len() as i32;
+		all[(idx + dir).rem_euclid(len) as usize]
+	}
+
+	pub fn label(&self) -> &'static str {
+		match self {
+			OneByte => "1 Byte",
+			TwoByte => "2 Bytes",
+			FourByte => "4 Bytes",
+			EightByte => "8 Bytes",
+			SixteenByte => "16 Bytes",
+			ThirtyTwoByte => "32 Bytes",
+		}
+	}
+
+	pub const fn value(&self) -> usize { *self as _ }
 }
 
 pub fn get_process_image_path(handle: Handle) -> Result<String, ProcessImagePathError> {
@@ -124,3 +166,90 @@ macro_rules! get {
 }
 
 pub(crate) use get;
+
+#[derive(Clone, Copy)]
+pub struct BitLayout {
+	init_mask: u64,
+	steps: [(u32, u64); 6],
+	num_steps: usize,
+}
+
+#[allow(non_snake_case)]
+#[inline(always)]
+pub const fn compute_layout(N: usize) -> BitLayout {
+	assert!(N.is_power_of_two() && N >= 2 && N <= 64, "N must be a power of two 2 < N < 64");
+
+	let mut init_mask = 0u64;
+	let mut i = 0;
+	while i < 64 {
+		init_mask |= 1u64 << i;
+		i += N;
+	}
+
+	let mut steps = [(0u32, 0u64); 6];
+	let mut num_steps = 0;
+
+	let mut shift = (N - 1) as u32;
+	let mut block_size = 1;
+
+	while shift < 64 {
+		let group_bits = block_size * 2;
+		let period = N * group_bits;
+		if period > 64 {
+			break;
+		}
+
+		let group_mask = if group_bits == 64 {
+			u64::MAX
+		} else {
+			(1u64 << group_bits) - 1
+		};
+
+		let mut step_mask = 0u64;
+		let mut p = 0;
+		while p < 64 {
+			step_mask |= group_mask << p;
+			p += period;
+		}
+
+		steps[num_steps] = (shift, step_mask);
+		num_steps += 1;
+
+		shift <<= 1;
+		block_size <<= 1;
+	}
+
+	BitLayout { init_mask, steps, num_steps }
+}
+
+#[inline]
+pub fn extract(val: u64, layout: BitLayout) -> u64 {
+	let mut x = val & layout.init_mask;
+	let mut i = 0;
+	while i < layout.num_steps {
+		let (shift, mask) = layout.steps[i];
+		x = (x | (x >> shift)) & mask;
+		i += 1;
+	}
+	x
+}
+
+#[inline]
+pub fn deposit(val: u64, layout: BitLayout) -> u64 {
+
+	let start_mask = layout.steps[layout.num_steps - 1].1;
+	let mut x = val & start_mask;
+
+	let mut i = layout.num_steps;
+	while i > 0 {
+		i -= 1;
+		let shift = layout.steps[i].0;
+		let mask = if i == 0 {
+			layout.init_mask
+		} else {
+			layout.steps[i - 1].1
+		};
+		x = (x | (x << shift)) & mask;
+	}
+	x
+}

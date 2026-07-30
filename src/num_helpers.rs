@@ -1,5 +1,7 @@
-use std::arch::x86_64::_pext_u64;
+#![allow(unexpected_cfgs)]
+
 use std::cmp::Ordering;
+use std::marker::PhantomData;
 use std::ptr::read_unaligned;
 use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
 use std::simd::prelude::*;
@@ -9,7 +11,7 @@ use bitvec::view::BitView;
 use num_traits::Float;
 
 use crate::simd_types::ToSimd;
-use crate::utils::{get, MatchMask};
+use crate::utils::{compute_layout, deposit, extract, get, BitLayout, MatchMask};
 
 pub trait FromU128 {
 	fn from_u128(x: u128) -> Self;
@@ -63,9 +65,6 @@ pub enum ScanCondition<T: Scannable> {
 }
 
 impl<T: Scannable> ScanCondition<T> {
-	pub const fn default_alignment(&self) -> usize {
-		<T as Scannable>::DEFAULT_ALIGNMENT
-	}
 
 	pub const fn from_greater_than(value: T) -> Self {
 		Self::Range(value, T::MAX)
@@ -125,33 +124,37 @@ pub trait Scannable: PartialEq + PartialOrd + ToSimd + 'static {
 	}
 }
 
-#[cfg(fast_bmi2)]
-#[inline(always)]
-fn deposit_bits(value: u64, mask: u64) -> u64 {
-	use std::arch::x86_64::_pdep_u64;
-	unsafe { _pdep_u64(value, mask) }
+struct ScanHelper<T, const N: usize> {
+	_marker: PhantomData<T>,
 }
 
-#[cfg(not(fast_bmi2))]
-#[inline(always)]
-fn deposit_bits(value: u64, mask: u64) -> u64 {
-	value.deposit_bits(mask)
+impl<T: Scannable, const N: usize> ScanHelper<T, N> {
+	pub const COMPRESS_RATIO: usize = if N > T::SIZE { N / T::SIZE } else { 2 };
+	pub const DEPOSIT_RATIO: usize = if T::SIZE > N { T::SIZE / N } else { 2 };
+
+	pub const COMPRESS_LAYOUT: BitLayout = compute_layout(Self::COMPRESS_RATIO);
+	pub const DEPOSIT_LAYOUT: BitLayout = compute_layout(Self::DEPOSIT_RATIO);
 }
 
-#[cfg(fast_bmi2)]
+#[allow(unused)]
 #[inline(always)]
-fn extract_bits(value: u64, mask: u64) -> u64 {
-	use std::arch::x86_64::_pext_u64;
-	unsafe { _pext_u64(value, mask) }
+fn deposit_bits(value: u64, mask: u64, layout: BitLayout) -> u64 {
+	#[cfg(fast_bmi2)]
+	unsafe { ::core::arch::x86_64::_pdep_u64(value, mask) }
+	#[cfg(not(fast_bmi2))]
+	deposit(value, layout)
 }
 
-#[cfg(not(fast_bmi2))]
+#[allow(unused)]
 #[inline(always)]
-fn extract_bits(value: u64, mask: u64) -> u64 {
-	value.extract_bits(mask)
+fn extract_bits(value: u64, mask: u64, layout: BitLayout) -> u64 {
+	#[cfg(fast_bmi2)]
+	unsafe { ::core::arch::x86_64::_pext_u64(value, mask) }
+	#[cfg(not(fast_bmi2))]
+	extract(value, layout)
 }
 
-#[inline]
+#[inline(always)]
 fn spacing_mask(ratio: usize) -> u64 {
 	let mut mask = 0;
 	for i in 0..(64 / ratio) {
@@ -160,13 +163,10 @@ fn spacing_mask(ratio: usize) -> u64 {
 	mask
 }
 
-pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize) -> MatchMask {
-	use core::arch::x86_64::{_pdep_u64, _pext_u64};
-
+pub fn scan<T: Scannable, const N: usize>(bytes: &[u8], cond: ScanCondition<T>) -> MatchMask {
 	let elem_size = T::SIZE;
 	let reg_width = size_of::<T::Vector>();
-	let alignment = alignment.max(1);
-	let elements = 1 + (bytes.len().saturating_sub(elem_size)) / alignment;
+	let elements = 1 + (bytes.len().saturating_sub(elem_size)) / N;
 	let mut res2 = MatchMask::with_capacity(elements);
 
 	if bytes.len() < elem_size {
@@ -175,7 +175,7 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 
 	let mut i = 0;
 
-	if alignment == elem_size {
+	if N == elem_size {
 		while i + reg_width <= bytes.len() {
 			let chunk = get!(bytes, i, reg_width);
 			let v = T::load(chunk);
@@ -184,31 +184,33 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 			res2.extend_from_bitslice(view);
 			i += reg_width;
 		}
-	} else if alignment > elem_size {
-		debug_assert_eq!(alignment % elem_size, 0);
-		let ratio = alignment / elem_size;
+	} else if N > elem_size {
+		debug_assert_eq!(N % elem_size, 0);
+		let layout = ScanHelper::<T, N>::COMPRESS_LAYOUT;
+		let ratio = ScanHelper::<T, N>::COMPRESS_RATIO;
 		let extract_mask = spacing_mask(ratio);
 		while i + reg_width <= bytes.len() {
 			let chunk = get!(bytes, i, reg_width);
 			let v = T::load(chunk);
 			let mask = T::eval(&cond, v);
-			let compressed = unsafe { _pext_u64(mask, extract_mask) };
+			let compressed = extract_bits(mask, extract_mask, layout);
 			let view = &compressed.view_bits::<Lsb0>()[..T::LANES / ratio];
 			res2.extend_from_bitslice(view);
 			i += reg_width;
 		}
 	} else {
-		debug_assert_eq!(elem_size % alignment, 0);
-		let ratio = elem_size / alignment;
+		debug_assert_eq!(elem_size % N, 0);
+		let layout = ScanHelper::<T, N>::DEPOSIT_LAYOUT;
+		let ratio = ScanHelper::<T, N>::DEPOSIT_RATIO;
 		let deposit_mask = spacing_mask(ratio);
 		while i + reg_width + elem_size - 1 <= bytes.len() {
 			let mut chunk_mask = 0u64;
-			for offset in (0..elem_size).step_by(alignment) {
+			for offset in (0..elem_size).step_by(N) {
 				let chunk = get!(bytes, i + offset, reg_width);
 				let v = T::load(chunk);
 				let bitmask = T::eval(&cond, v);
-				let spaced_bits = unsafe { _pdep_u64(bitmask, deposit_mask) };
-				chunk_mask |= spaced_bits << (offset / alignment);
+				let spaced_bits = deposit_bits(bitmask, deposit_mask, layout);
+				chunk_mask |= spaced_bits << (offset / N);
 			}
 			let view = &chunk_mask.view_bits::<Lsb0>()[..T::LANES * ratio];
 			res2.extend_from_bitslice(view);
@@ -216,12 +218,12 @@ pub fn scan<T: Scannable>(bytes: &[u8], cond: ScanCondition<T>, alignment: usize
 		}
 	}
 
-	let mut rem_i = i.div_ceil(alignment) * alignment;
+	let mut rem_i = i.div_ceil(N) * N;
 
 	while rem_i + elem_size <= bytes.len() {
 		let value = T::from_bytes(get!(bytes, rem_i, elem_size));
 		res2.push(T::matches(&cond, value));
-		rem_i += alignment;
+		rem_i += N;
 	}
 
 	res2
@@ -407,12 +409,19 @@ impl ArrayByteExt for [u8] {
 
 impl ArrayScanExt for [u8] {
 	fn scan_for<T: Scannable>(&self, cond: ScanCondition<T>, alignment: usize) -> MatchMask {
-		scan(self, cond, alignment)
+		match alignment {
+			1 => scan::<T, 1>(self, cond),
+			2 => scan::<T, 2>(self, cond),
+			4 => scan::<T, 4>(self, cond),
+			8 => scan::<T, 8>(self, cond),
+			16 => scan::<T, 16>(self, cond),
+			32 => scan::<T, 32>(self, cond),
+			_ => unreachable!(),
+		}
 	}
 
 	fn find_pattern(&self, needle: &[u8], alignment: usize) -> MatchMask {
 		let n = needle.len();
-		let alignment = alignment.max(1);
 
 		if n == 0 || self.len() < n {
 			return MatchMask::new();
