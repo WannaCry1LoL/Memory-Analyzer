@@ -4,7 +4,6 @@
 extern crate core;
 
 mod errors;
-mod externs;
 mod matches;
 mod mem2disk;
 mod memory_scanner;

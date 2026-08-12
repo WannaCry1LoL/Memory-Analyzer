@@ -1,4 +1,4 @@
-use crate::ffi::types::{NtStatus, PageProtectionFlags, SystemInformationClass, Win32Error};
+use crate::ffi::types::{NtStatus, PageProtectionFlags, SystemInformationClass};
 
 pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_PRIVATE: u32 = 0x20000;

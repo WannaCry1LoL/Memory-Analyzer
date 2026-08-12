@@ -14,10 +14,8 @@ fn main() {
 	let slow_bmi2_cpus = ["excavator", "znver1", "znver2", "geode", "k6-2"];
 
 	if let Some(mut target_cpu) = get_target_cpu() {
-		if target_cpu == "native" {
-			if let Some(actual_cpu) = get_native_cpu() {
-				target_cpu = actual_cpu;
-			}
+		if target_cpu == "native" && let Some(actual_cpu) = get_native_cpu() {
+			target_cpu = actual_cpu;
 		}
 
 		if slow_bmi2_cpus.contains(&target_cpu.as_str()) { return; }
@@ -76,14 +74,15 @@ fn get_native_cpu() -> Option<String> {
 
 	for line in stdout.lines() {
 		let line = line.trim();
-		if line.starts_with("native") {
-			if let Some(start_idx) = line.find("(currently ") {
-				let name_start = start_idx + "(currently ".len();
-				if let Some(end_offset) = line[name_start..].find(')') {
-					return Some(line[name_start..name_start + end_offset].to_string());
-				}
+		if line.starts_with("native") 
+			&& let Some(start_idx) = line.find("(currently ") 
+		{
+			let name_start = start_idx + "(currently ".len();
+			if let Some(end_offset) = line[name_start..].find(')') {
+				return Some(line[name_start..name_start + end_offset].to_string());
 			}
 		}
+		
 	}
 
 	None

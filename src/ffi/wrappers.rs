@@ -54,7 +54,7 @@ pub unsafe fn open_process(
 		let status = NtOpenProcess(
 			&mut handle,
 			desired_access,
-			Some(&mut object_attributes),
+			&mut object_attributes,
 			Some(&mut client_id),
 		);
 

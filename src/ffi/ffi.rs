@@ -35,7 +35,7 @@ unsafe extern "system" {
 	pub fn NtOpenProcess(
 		process_handle: &mut Handle,
 		desired_access: u32,
-		object_attributes: Option<&mut ObjectAttributes>,
+		object_attributes: &mut ObjectAttributes,
 		client_id: Option<&mut ClientId>,
 	) -> NtStatus;
 
