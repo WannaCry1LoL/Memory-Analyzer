@@ -31,6 +31,7 @@ pub enum Focus {
 	Executable,
 	CopyOnWrite,
 	FreezeProcess,
+	CompareToInitialValue,
 	ScanBtn,
 	NextScanBtn,
 	ResultsList,
@@ -140,10 +141,29 @@ pub enum ScanMode {
 	BiggerThan,
 	SmallerThan,
 	ValueBetween,
+	Changed,
+	Unchanged,
+	Increased,
+	Decreased,
+	IncreasedBy,
+	DecreasedBy,
 }
 
 impl ScanMode {
-	pub const ALL: [ScanMode; 4] = [
+	pub const ALL: [ScanMode; 10] = [
+		ScanMode::ExactValue,
+		ScanMode::BiggerThan,
+		ScanMode::SmallerThan,
+		ScanMode::ValueBetween,
+		ScanMode::Changed,
+		ScanMode::Unchanged,
+		ScanMode::Increased,
+		ScanMode::Decreased,
+		ScanMode::IncreasedBy,
+		ScanMode::DecreasedBy,
+	];
+	
+	pub const ALL_INITIAL: [ScanMode; 4] = [
 		ScanMode::ExactValue,
 		ScanMode::BiggerThan,
 		ScanMode::SmallerThan,
@@ -156,28 +176,49 @@ impl ScanMode {
 			ScanMode::BiggerThan => "Bigger than",
 			ScanMode::SmallerThan => "Smaller than",
 			ScanMode::ValueBetween => "Value between",
+			ScanMode::Changed => "Changed value",
+			ScanMode::Unchanged => "Unchanged value",
+			ScanMode::Increased => "Increased value",
+			ScanMode::Decreased => "Decreased value",
+			ScanMode::IncreasedBy => "Increased value by",
+			ScanMode::DecreasedBy => "Decreased value by",
 		}
 	}
 
 	pub fn needs_value(self) -> bool {
 		matches!(
 			self,
-			ScanMode::ExactValue
-				| ScanMode::BiggerThan
-				| ScanMode::SmallerThan
-				| ScanMode::ValueBetween
+			| ScanMode::ExactValue  | ScanMode::BiggerThan
+			| ScanMode::SmallerThan | ScanMode::ValueBetween
+			| ScanMode::IncreasedBy | ScanMode::DecreasedBy
 		)
 	}
 
-	pub fn needs_second_value(self) -> bool {
-		matches!(self, ScanMode::ValueBetween)
+	pub fn needs_second_value(self) -> bool { self == ScanMode::ValueBetween }
+
+	pub fn requires_previous_scan(self) -> bool {
+		matches!(
+			self,
+			| ScanMode::Changed     | ScanMode::Unchanged
+			| ScanMode::Increased   | ScanMode::Decreased
+			| ScanMode::IncreasedBy | ScanMode::DecreasedBy
+		)
 	}
 
-	pub fn cycle(self, dir: i32) -> ScanMode {
-		let all = Self::ALL;
-		let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
-		let len = all.len() as i32;
-		all[(idx + dir).rem_euclid(len) as usize]
+	pub fn cycle(self, dir: i32, is_initial: bool) -> ScanMode {
+		let non_initial = Self::ALL;
+		let initial = Self::ALL_INITIAL;
+		if is_initial {
+			let all = initial;
+			let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
+			let len = all.len() as i32;
+			all[(idx + dir).rem_euclid(len) as usize]
+		} else {
+			let all = non_initial;
+			let idx = all.iter().position(|v| *v == self).unwrap_or(0) as i32;
+			let len = all.len() as i32;
+			all[(idx + dir).rem_euclid(len) as usize]
+		}
 	}
 }
 

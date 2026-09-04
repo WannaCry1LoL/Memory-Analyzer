@@ -28,7 +28,25 @@ macro_rules! impl_from_u128 {
 }
 
 impl_from_u128!(u8, u16, u32, u64);
+pub trait ApproxEq {
+	fn approx_eq(self, other: Self) -> bool;
+}
 
+impl ApproxEq for f32 {
+	fn approx_eq(self, b: Self) -> bool {
+		let diff = (self - b).abs();
+		let scale = self.abs().max(b.abs()).max(1.0);
+		diff <= scale * Self::epsilon() * 16.0
+	}
+}
+
+impl ApproxEq for f64 {
+	fn approx_eq(self, b: Self) -> bool {
+		let diff = (self - b).abs();
+		let scale = self.abs().max(b.abs()).max(1.0);
+		diff <= scale * Self::epsilon() * 16.0
+	}
+}
 pub trait FuzzyEq {
 	fn fuzzy_eq(self, other: Self, epsilon: Self) -> bool;
 }
@@ -49,6 +67,7 @@ impl<T: Float> FuzzyEq for T {
 		diff < largest * epsilon
 	}
 }
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScanCondition<T: Scannable> {

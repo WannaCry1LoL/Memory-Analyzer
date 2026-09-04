@@ -208,6 +208,12 @@ fn handle_key_scanner(app: &mut App, code: KeyCode) {
 			}
 			_ => {}
 		},
+		Focus::CompareToInitialValue => match code {
+			KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Right => {
+				app.compare_to_initial = !app.compare_to_initial
+			},
+			_ => {}
+		}
 		Focus::ResultsList => match code {
 			KeyCode::Up | KeyCode::Char('k') => app.results_move(-1),
 			KeyCode::Down | KeyCode::Char('j') => app.results_move(1),

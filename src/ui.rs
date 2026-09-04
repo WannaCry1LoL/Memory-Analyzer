@@ -145,6 +145,7 @@ pub struct App {
 	pub range_start: String,
 	pub range_end: String,
 	pub freeze_process: bool,
+	pub compare_to_initial: bool,
 	pub writable: TriState,
 	pub executable: TriState,
 	pub cow: TriState,
@@ -197,6 +198,7 @@ impl App {
 			range_start: "0".into(),
 			range_end: "00007FFFFFFFFFFF".into(),
 			freeze_process: false,
+			compare_to_initial: false,
 			writable: TriState::True,
 			executable: TriState::DontCare,
 			cow: TriState::False,
@@ -343,6 +345,7 @@ impl App {
 		}
 
 		order.push(Focus::FreezeProcess);
+		order.push(Focus::CompareToInitialValue);
 		order.push(Focus::ScanBtn);
 		if self.has_first_scan {
 			order.push(Focus::NextScanBtn);
@@ -372,7 +375,7 @@ impl App {
 				self.value_type = self.value_type.cycle(dir);
 				self.alignment = self.value_type.natural_alignment().to_string()
 			}
-			Focus::ScanMode => self.scan_mode = self.scan_mode.cycle(dir),
+			Focus::ScanMode => self.scan_mode = self.scan_mode.cycle(dir, !self.has_first_scan),
 			Focus::RoundingMode => self.rounding_mode = self.rounding_mode.cycle(dir),
 			_ => {}
 		}
@@ -591,24 +594,45 @@ impl App {
 				.map_err(|_| format!("Invalid float: {}", s))
 		};
 
+		if self.scan_mode.requires_previous_scan() && !self.has_first_scan {
+			return Err("This scan mode requires a first scan before it can be used.".into());
+		}
+
 		match self.value_type {
 			UiValueType::Float | UiValueType::Double => {
-				let first = parse_float(&self.value_input)?;
 				let cond = match self.scan_mode {
-					ScanMode::ExactValue => match self.rounding_mode {
-						RoundingMode::Default =>
-							FloatCondition::Range(first - 0.5, (first + 0.5).next_down()),
-						RoundingMode::Extreme =>
-							FloatCondition::Range(first - 1.0, (first + 1.0).next_down()),
-						RoundingMode::Truncate if first >= 0.0 =>
-							FloatCondition::Range(first, (first + 1.0).next_down()),
-						RoundingMode::Truncate =>
-							FloatCondition::Range((first - 1.0).next_up(), first),
-					},
-					ScanMode::BiggerThan => FloatCondition::GreaterThan(first),
-					ScanMode::SmallerThan => FloatCondition::LessThan(first),
-					ScanMode::ValueBetween => 
-						FloatCondition::Range(first, parse_float(&self.value_input2)?),
+					ScanMode::ExactValue => {
+						let first = parse_float(&self.value_input)?;
+						match self.rounding_mode {
+							RoundingMode::Default =>
+								FloatCondition::Range(first - 0.5, (first + 0.5).next_down()),
+							RoundingMode::Extreme =>
+								FloatCondition::Range(first - 1.0, (first + 1.0).next_down()),
+							RoundingMode::Truncate if first >= 0.0 =>
+								FloatCondition::Range(first, (first + 1.0).next_down()),
+							RoundingMode::Truncate =>
+								FloatCondition::Range((first - 1.0).next_up(), first),
+						}
+					}
+					ScanMode::BiggerThan =>
+						FloatCondition::GreaterThan(parse_float(&self.value_input)?),
+					ScanMode::SmallerThan =>
+						FloatCondition::LessThan(parse_float(&self.value_input)?),
+					ScanMode::ValueBetween =>
+						FloatCondition::Range(
+							parse_float(&self.value_input)?,
+							parse_float(&self.value_input2)?
+						),
+					ScanMode::Changed => FloatCondition::Changed,
+					ScanMode::Unchanged => FloatCondition::Unchanged,
+					ScanMode::Increased => FloatCondition::Increased,
+					ScanMode::Decreased => FloatCondition::Decreased,
+					ScanMode::IncreasedBy => FloatCondition::IncreasedBy(
+						parse_float(&self.value_input)?
+					),
+					ScanMode::DecreasedBy => FloatCondition::DecreasedBy(
+						parse_float(&self.value_input)?
+					),
 				};
 				let value_type = match self.value_type {
 					UiValueType::Double => ValueType::Double(cond),
@@ -617,27 +641,36 @@ impl App {
 				Ok(ScanRequest {
 					value_type,
 					freeze_process: self.freeze_process,
+					compare_to_initial: self.compare_to_initial,
 				})
 			}
 			UiValueType::ArrayOfByte => {
+				if self.scan_mode.requires_previous_scan() {
+					return Err("Unsupported for byte arrays".to_string());
+				}
 				let b_arr = string_to_bytes_hex(&self.value_input)
 					.map_err(|_| "Invalid Byte Array".to_string())?;
 				Ok(ScanRequest {
 					value_type: ValueType::ByteArray(b_arr),
 					freeze_process: self.freeze_process,
+					compare_to_initial: self.compare_to_initial,
 				})
 			}
 			_ => {
 				let cond = match self.scan_mode {
 					ScanMode::ExactValue => IntCondition::Eq(parse_int(&self.value_input)?),
-					ScanMode::BiggerThan => {
-						IntCondition::GreaterThan(parse_int(&self.value_input)?)
-					}
+					ScanMode::BiggerThan => IntCondition::GreaterThan(parse_int(&self.value_input)?),
 					ScanMode::SmallerThan => IntCondition::LessThan(parse_int(&self.value_input)?),
 					ScanMode::ValueBetween => IntCondition::Range(
 						parse_int(&self.value_input)?,
 						parse_int(&self.value_input2)?,
 					),
+					ScanMode::Changed => IntCondition::Changed,
+					ScanMode::Unchanged => IntCondition::Unchanged,
+					ScanMode::Increased => IntCondition::Increased,
+					ScanMode::Decreased => IntCondition::Decreased,
+					ScanMode::IncreasedBy => IntCondition::IncreasedBy(parse_int(&self.value_input)?),
+					ScanMode::DecreasedBy => IntCondition::DecreasedBy(parse_int(&self.value_input)?),
 				};
 				let value_type = match self.value_type {
 					UiValueType::Byte => ValueType::Byte(cond),
@@ -649,6 +682,7 @@ impl App {
 				Ok(ScanRequest {
 					value_type,
 					freeze_process: self.freeze_process,
+					compare_to_initial: self.compare_to_initial,
 				})
 			}
 		}
@@ -679,6 +713,7 @@ impl App {
 		if let Some(scanner) = self.scanner.as_mut() {
 			scanner.state = MatchingState::new(1, 1, true);
 		}
+		if self.scan_mode.requires_previous_scan() { self.scan_mode = ScanMode::ExactValue; }
 		self.has_first_scan = false;
 		self.scan_count = 0;
 		self.results_selected = 0;
@@ -1218,7 +1253,7 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 		.title(" Scan Settings ");
 	let inner = block.inner(area);
 	f.render_widget(block, area);
-
+	let needs_v = app.scan_mode.needs_value();
 	let needs_v2 = app.scan_mode.needs_second_value();
 	let mut constraints = vec![
 		Constraint::Length(3), // Value type
@@ -1227,9 +1262,12 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 		constraints.push(Constraint::Length(3));
 	}
 	if app.scan_mode.needs_value() {
-		constraints.push(Constraint::Length(3)); // Value
-		if needs_v2 {
-			constraints.push(Constraint::Length(3)); // Value2
+		if needs_v {
+			constraints.push(Constraint::Length(3)); // Value
+
+			if needs_v2 {
+				constraints.push(Constraint::Length(3)); // Value2
+			}
 		}
 	}
 	constraints.push(Constraint::Length(3)); // Alignment
@@ -1239,6 +1277,7 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 	}
 	constraints.push(Constraint::Length(3)); // Protection flags
 	constraints.push(Constraint::Length(3)); // Freeze process
+	constraints.push(Constraint::Length(3)); // Compare to initial value
 	constraints.push(Constraint::Length(3)); // Scan buttons
 	constraints.push(Constraint::Min(1)); // Filler
 
@@ -1366,6 +1405,15 @@ fn draw_scan_config(f: &mut Frame, app: &App, area: Rect) {
 		"Freeze Process",
 		app.freeze_process.into(),
 		box_style(app, Focus::FreezeProcess),
+	);
+	idx += 1;
+
+	render_tristate(
+		f,
+		rows[idx],
+		"Compare to Initial Value",
+		app.compare_to_initial.into(),
+		box_style(app, Focus::CompareToInitialValue),
 	);
 	idx += 1;
 
@@ -1525,16 +1573,13 @@ fn draw_saved(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 	let help = match app.focus {
 		Focus::ValueType | Focus::ScanMode => "\u{2190}/\u{2192}: change   Tab: next field",
-		Focus::ValueInput
-		| Focus::ValueInput2
-		| Focus::Alignment
-		| Focus::RangeStart
-		| Focus::RangeEnd
-		| Focus::RoundingMode
-		| Focus::FreezeProcess => "Enter: edit   Tab: next field",
-		Focus::Writable | Focus::Executable | Focus::CopyOnWrite => {
-			"Enter/\u{2190}\u{2192}: toggle   Tab: next field"
-		}
+		| Focus::ValueInput | Focus::ValueInput2
+		| Focus::Alignment  | Focus::RangeStart
+		| Focus::RangeEnd   | Focus::RoundingMode
+		| Focus::FreezeProcess | Focus::CompareToInitialValue =>
+			"Enter: edit   Tab: next field",
+		Focus::Writable | Focus::Executable | Focus::CopyOnWrite =>
+			"Enter/\u{2190}\u{2192}: toggle   Tab: next field",
 		Focus::ScanBtn => "Enter: run scan",
 		Focus::NextScanBtn => "Enter: run next scan",
 		Focus::ResultsList => "\u{2191}/\u{2193}: select   a/Enter: add to saved list",

@@ -1,10 +1,11 @@
+use num_traits::{WrappingAdd, WrappingSub};
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
 
 use crate::errors::MemoryScanError;
 use crate::matches::MatchingState;
 use crate::mem2disk::{BlockDescriptor, DumpFlags, ScanDiskManager};
-use crate::num_helpers::{ArrayScanExt, FromU128, ScanCondition, Scannable};
+use crate::num_helpers::{ApproxEq, ArrayScanExt, FromU128, FuzzyEq, ScanCondition, Scannable};
 use crate::process::Process;
 use crate::simd_types::ToSimd;
 use crate::utils::{get, MatchMask};
@@ -17,6 +18,21 @@ pub enum IntCondition {
 	GreaterThan(i128),
 	LessThan(i128),
 	FuzzyEq(i128, i128),
+	Changed,
+	Unchanged,
+	Increased,
+	Decreased,
+	IncreasedBy(i128),
+	DecreasedBy(i128),
+}
+impl IntCondition {
+	pub const fn is_delta(&self) -> bool {
+		matches!(self,
+			| Self::Changed         | Self::Unchanged
+			| Self::Increased       | Self::Decreased
+			| Self::IncreasedBy(_)  | Self::DecreasedBy(_)
+		)
+	}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +43,22 @@ pub enum FloatCondition {
 	GreaterThan(f64),
 	LessThan(f64),
 	FuzzyEq(f64, f64),
+	Changed,
+	Unchanged,
+	Increased,
+	Decreased,
+	IncreasedBy(f64),
+	DecreasedBy(f64),
+}
+
+impl FloatCondition {
+	pub const fn is_delta(&self) -> bool {
+		matches!(self,
+			| Self::Changed         | Self::Unchanged
+			| Self::Increased       | Self::Decreased
+			| Self::IncreasedBy(_)  | Self::DecreasedBy(_)
+		)
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +76,7 @@ pub enum ValueType {
 pub struct ScanRequest {
 	pub value_type: ValueType,
 	pub freeze_process: bool,
+	pub compare_to_initial: bool,
 }
 
 fn to_bit_pattern<T: Scannable + FromU128>(x: i128) -> T {
@@ -62,7 +95,8 @@ impl<T: Scannable + FromU128> From<IntCondition> for ScanCondition<T> {
 			IntCondition::GreaterThan(n) => Self::from_greater_than(to_bit_pattern(n)),
 			IntCondition::LessThan(n) => Self::from_less_than(to_bit_pattern(n)),
 			IntCondition::FuzzyEq(n, eps) =>
-				Self::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps))
+				Self::FuzzyEq(to_bit_pattern(n), to_bit_pattern(eps)),
+			_ => unreachable!("delta conditions are narrow only")
 		}
 	}
 }
@@ -76,6 +110,7 @@ impl From<FloatCondition> for ScanCondition<f32> {
 			FloatCondition::LessThan(n) => Self::from_less_than(n as f32),
 			FloatCondition::GreaterThan(n) => Self::from_greater_than(n as f32),
 			FloatCondition::FuzzyEq(n, eps) => Self::FuzzyEq(n as f32, eps as f32),
+			_ => unreachable!("delta conditions are narrow only")
 		}
 	}
 }
@@ -89,6 +124,7 @@ impl From<FloatCondition> for ScanCondition<f64> {
 			FloatCondition::LessThan(n) => Self::from_less_than(n),
 			FloatCondition::GreaterThan(n) => Self::from_greater_than(n),
 			FloatCondition::FuzzyEq(n, eps) => Self::FuzzyEq(n, eps),
+			_ => unreachable!("delta conditions are narrow only")
 		}
 	}
 }
@@ -101,6 +137,16 @@ impl ScanRequest {
 			ValueType::TwoBytes(_) => 2,
 			ValueType::FourBytes(_) | ValueType::Float(_) => 4,
 			ValueType::EightBytes(_) | ValueType::Double(_) => 8,
+		}
+	}
+
+	pub fn is_narrow_only(&self) -> bool {
+		match &self.value_type {
+			| ValueType::Byte(c) | ValueType::TwoBytes(c)
+			| ValueType::FourBytes(c) | ValueType::EightBytes(c)
+				=> c.is_delta(),
+			ValueType::Float(c) | ValueType::Double(c) => c.is_delta(),
+			ValueType::ByteArray(_) => false,
 		}
 	}
 
@@ -122,16 +168,82 @@ impl ScanRequest {
 			ValueType::ByteArray(p) => bytes.find_pattern(p, alignment),
 		}
 	}
-
-	fn test_bytes(&self, bytes: &[u8]) -> bool {
+	fn test_bytes(&self, bytes: &[u8], previous: &[u8]) -> bool {
 		match &self.value_type {
-			ValueType::Byte(c) => u8::matches(&(*c).into(), u8::from_bytes(bytes)),
-			ValueType::TwoBytes(c) => u16::matches(&(*c).into(), u16::from_bytes(bytes)),
-			ValueType::FourBytes(c) => u32::matches(&(*c).into(), u32::from_bytes(bytes)),
-			ValueType::EightBytes(c) => u64::matches(&(*c).into(), u64::from_bytes(bytes)),
-			ValueType::Float(c) => f32::matches(&(*c).into(), f32::from_bytes(bytes)),
-			ValueType::Double(c) => f64::matches(&(*c).into(), f64::from_bytes(bytes)),
+			ValueType::Byte(c) => Self::test_int::<u8>(c, bytes, previous),
+			ValueType::TwoBytes(c) => Self::test_int::<u16>(c, bytes, previous),
+			ValueType::FourBytes(c) => Self::test_int::<u32>(c, bytes, previous),
+			ValueType::EightBytes(c) => Self::test_int::<u64>(c, bytes, previous),
+			ValueType::Float(c) => Self::test_float_f32(c, bytes, previous),
+			ValueType::Double(c) => Self::test_float_f64(c, bytes, previous),
 			ValueType::ByteArray(pattern) => bytes == pattern.as_slice(),
+		}
+	}
+
+	fn test_int<T>(cond: &IntCondition, bytes: &[u8], previous: &[u8]) -> bool
+	where T: Scannable + FromU128 + WrappingAdd + WrappingSub,
+	{
+		match *cond {
+			IntCondition::Changed => T::from_bytes(bytes) != T::from_bytes(previous),
+			IntCondition::Unchanged => T::from_bytes(bytes) == T::from_bytes(previous),
+			IntCondition::Increased => T::from_bytes(bytes) > T::from_bytes(previous),
+			IntCondition::Decreased => T::from_bytes(bytes) < T::from_bytes(previous),
+			IntCondition::IncreasedBy(delta) => {
+				let target = T::from_bytes(previous).wrapping_add(&to_bit_pattern(delta));
+				T::from_bytes(bytes) == target
+			}
+			IntCondition::DecreasedBy(delta) => {
+				let target = T::from_bytes(previous).wrapping_sub(&to_bit_pattern(delta));
+				T::from_bytes(bytes) == target
+			}
+			_ => {
+				let sc: ScanCondition<T> = (*cond).into();
+				T::matches(&sc, T::from_bytes(bytes))
+			}
+		}
+	}
+
+	fn test_float_f32(cond: &FloatCondition, bytes: &[u8], previous: &[u8]) -> bool {
+		let current = f32::from_bytes(bytes);
+		match *cond {
+			FloatCondition::Changed => current != f32::from_bytes(previous),
+			FloatCondition::Unchanged => current == f32::from_bytes(previous),
+			FloatCondition::Increased => current > f32::from_bytes(previous),
+			FloatCondition::Decreased => current < f32::from_bytes(previous),
+			FloatCondition::IncreasedBy(delta) => {
+				let target = f32::from_bytes(previous) + delta as f32;
+				current.approx_eq(target)
+			}
+			FloatCondition::DecreasedBy(delta) => {
+				let target = f32::from_bytes(previous) - delta as f32;
+				current.approx_eq(target)
+			}
+			_ => {
+				let sc: ScanCondition<f32> = (*cond).into();
+				f32::matches(&sc, current)
+			}
+		}
+	}
+
+	fn test_float_f64(cond: &FloatCondition, bytes: &[u8], previous: &[u8]) -> bool {
+		let current = f64::from_bytes(bytes);
+		match *cond {
+			FloatCondition::Changed => current != f64::from_bytes(previous),
+			FloatCondition::Unchanged => current == f64::from_bytes(previous),
+			FloatCondition::Increased => current > f64::from_bytes(previous),
+			FloatCondition::Decreased => current < f64::from_bytes(previous),
+			FloatCondition::IncreasedBy(delta) => {
+				let target = f64::from_bytes(previous) + delta;
+				current.approx_eq(target)
+			}
+			FloatCondition::DecreasedBy(delta) => {
+				let target = f64::from_bytes(previous) - delta;
+				current.approx_eq(target)
+			}
+			_ => {
+				let sc: ScanCondition<f64> = (*cond).into();
+				f64::matches(&sc, current)
+			}
 		}
 	}
 }
@@ -139,14 +251,14 @@ impl ScanRequest {
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
 	pub use_custom_alignment: bool,
-	pub custom_alignment: usize,
+	pub custom_alignment: usize
 }
 
 impl Default for ScanOptions {
 	fn default() -> Self {
 		Self {
 			use_custom_alignment: false,
-			custom_alignment: 4,
+			custom_alignment: 4
 		}
 	}
 }
@@ -190,6 +302,7 @@ impl MemoryScanner {
 	}
 
 	pub fn scan(&mut self, request: ScanRequest) -> Result<(), MemoryScanError> {
+		if request.is_narrow_only() { return Err(MemoryScanError::NarrowOnlyCondition); }
 		self.process
 			.init_handle()
 			.map_err(|_| MemoryScanError::HandleInitFailed)?;
@@ -263,8 +376,14 @@ impl MemoryScanner {
 
 		let process = &self.process;
 		let state = &self.state;
-		let initial = state.get_initial();
-		
+		let initial_data = state.get_initial();
+
+		let comparison_data: &[u8] = if request.compare_to_initial {
+			initial_data
+		} else {
+			&state.data
+		};
+
 		let mut capacity = 0;
 		for block in &state.blocks {
 			let mask_len = block.match_mask.len();
@@ -312,14 +431,15 @@ impl MemoryScanner {
 					if offset + elem_size > mem.len() { break; }
 
 					let bytes = get!(mem, offset, elem_size);
-
-					if request.test_bytes(bytes) {
+					let old_off = block.data_offset + k * elem_size;
+					let compare_bytes = get!(comparison_data, old_off, elem_size);
+					
+					if request.test_bytes(bytes, compare_bytes) {
 						new_mask.set(i, true);
 						current_values.extend_from_slice(bytes);
-
-						let old_off = block.data_offset + k * elem_size;
+						
 						initial_values
-							.extend_from_slice(get!(initial, old_off, elem_size));
+							.extend_from_slice(get!(initial_data, old_off, elem_size));
 					}
 				}
 

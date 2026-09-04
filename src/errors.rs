@@ -32,6 +32,7 @@ pub enum MemoryScanError {
 	MemoryReadFailed(MemoryReadError),
 	HandleInitFailed,
 	IncompatibleScanType,
+	NarrowOnlyCondition
 }
 
 #[derive(Debug)]
