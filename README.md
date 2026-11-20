@@ -4,7 +4,7 @@ A fast Windows memory analyzer written in Rust, developed as a diploma project.
 
 ## Features
 
-* **Fast Memory Scanning:** Utilizes SIMD instructions (AVX2 / AVX-512) for rapid pattern matching.
+* **Fast Memory Scanning:** Utilizes SIMD instructions (AVX2 / AVX-512) for pattern matching.
 * **Live Memory Editing:** Read and write values directly to target process memory spaces.
 * **Process Inspection:** Attach to running Windows processes and inspect memory regions.
 
